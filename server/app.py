@@ -41,8 +41,11 @@ CONFIG_FILE = APP_DIR / "config.json"
 
 CAPSULES_DIR.mkdir(parents=True, exist_ok=True)
 
-# 引用仓库内 data-pipeline 中的 Reaper 导出模块
-_DATA_PIPELINE = APP_DIR.parent / "data-pipeline"
+# 引用 data-pipeline 中的 Reaper 导出模块
+# 打包版: data-pipeline 在 APP_DIR 同级; 开发版: 在 APP_DIR.parent 下
+_DATA_PIPELINE = APP_DIR / "data-pipeline"
+if not _DATA_PIPELINE.exists():
+    _DATA_PIPELINE = APP_DIR.parent / "data-pipeline"
 if _DATA_PIPELINE.exists():
     sys.path.insert(0, str(_DATA_PIPELINE))
     try:
@@ -142,6 +145,8 @@ app = Flask(__name__, static_folder=None)
 _WEBAPP_DIR = APP_DIR / "webapp"
 if not _WEBAPP_DIR.exists():
     _WEBAPP_DIR = APP_DIR.parent / "webapp" / "dist"
+if not _WEBAPP_DIR.exists():
+    _WEBAPP_DIR = APP_DIR.parent / "webapp"
 
 if _WEBAPP_DIR.exists():
     from flask import send_from_directory
@@ -152,6 +157,9 @@ if _WEBAPP_DIR.exists():
 
     @app.route("/<path:path>")
     def serve_static(path):
+        if path.startswith("api/"):
+            from flask import abort
+            abort(404)
         file_path = _WEBAPP_DIR / path
         if file_path.exists() and file_path.is_file():
             return send_from_directory(str(_WEBAPP_DIR), path)
