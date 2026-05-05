@@ -1180,6 +1180,69 @@ function TransferView({
   );
 }
 
+function PortAndTokenSettings({ settings, toast, onSaved }) {
+  const [port, setPort] = useState(settings?.port || 5005);
+  const [token, setToken] = useState(settings?.shared_token || '');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (settings) {
+      setPort(settings.port || 5005);
+      setToken(settings.shared_token || '');
+    }
+  }, [settings]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const r = await api.updateSettings({ port: Number(port), shared_token: token });
+      onSaved(r.data);
+      toast.success('已保存，重启后生效');
+    } catch (e) {
+      toast.error(`保存失败：${e.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 mb-6">
+      <h3 className="text-sm font-bold text-slate-200 mb-4">网络设置</h3>
+      <div className="grid grid-cols-2 gap-4 mb-3">
+        <div>
+          <label className="text-xs text-slate-400 mb-1 block">监听端口</label>
+          <input
+            type="number"
+            value={port}
+            onChange={(e) => setPort(e.target.value)}
+            className="w-full bg-[#0f1115] border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-indigo-500"
+          />
+        </div>
+        <div>
+          <label className="text-xs text-slate-400 mb-1 block">共享密钥（留空 = 不验证）</label>
+          <input
+            type="text"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            placeholder="可选，双方需一致"
+            className="w-full bg-[#0f1115] border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-indigo-500"
+          />
+        </div>
+      </div>
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-slate-500">修改端口后需重启应用生效</p>
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg disabled:opacity-40"
+        >
+          {saving ? '保存中…' : '保存'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function SettingsView({ networkInfo, apiBase }) {
   const [settings, setSettings] = useState(null);
   const [reaperPath, setReaperPath] = useState('');
@@ -1286,6 +1349,8 @@ function SettingsView({ networkInfo, apiBase }) {
           </p>
         )}
       </div>
+
+      <PortAndTokenSettings settings={settings} toast={toast} onSaved={setSettings} />
 
       <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 space-y-3 text-sm">
         <Row k="API 地址" v={apiBase} />
