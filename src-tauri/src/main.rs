@@ -75,6 +75,7 @@ fn kill_backend(state: &BackendProcess) {
     // 额外保障：杀掉所有 flask-backend 进程
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         let _ = Command::new("taskkill")
             .args(["/F", "/IM", "flask-backend.exe"])
             .creation_flags(0x08000000)
