@@ -15,6 +15,29 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 
+def _win_restore_foreground(hwnd):
+    """Windows: 恢复指定窗口为前台窗口"""
+    if not hwnd or platform.system() != "Windows":
+        return
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        user32.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
+
+
+def _win_get_foreground():
+    """Windows: 获取当前前台窗口句柄"""
+    if platform.system() != "Windows":
+        return None
+    try:
+        import ctypes
+        return ctypes.windll.user32.GetForegroundWindow()
+    except Exception:
+        return None
+
+
 def get_export_temp_dir() -> Path:
     """
     获取跨平台的临时导出目录
@@ -325,6 +348,9 @@ class ReaperWebUIExporter:
 
                 print(f"✓ 执行命令: {' '.join(cmd)}")
 
+                # 记录当前前台窗口，以便命令执行后恢复焦点
+                prev_hwnd = _win_get_foreground()
+
                 # CREATE_NO_WINDOW + SW_HIDE 防止 CMD 窗口闪现抢焦点
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -337,6 +363,10 @@ class ReaperWebUIExporter:
                     creationflags=subprocess.CREATE_NO_WINDOW,
                     startupinfo=startupinfo
                 )
+
+                # REAPER 收到 -nonewinst 信号后可能抢焦点，立即恢复原来的前台窗口
+                time.sleep(0.3)
+                _win_restore_foreground(prev_hwnd)
 
                 print(f"✓ REAPER 命令已发送")
                 print(f"  返回码: {result.returncode}")
@@ -409,9 +439,17 @@ class ReaperWebUIExporter:
         print(f"检查间隔: {check_interval} 秒")
         print(f"期望的胶囊名称前缀: {expected_capsule_name}")
 
+        # Windows: 在等待期间持续恢复前台窗口焦点（防止 REAPER 打开标签页/渲染时抢焦点）
+        focus_restore_until = start_time + 15  # 前 15 秒内每秒恢复一次
+        prev_hwnd_poll = _win_get_foreground() if system == "Windows" else None
+
         waited_time = 0
         last_file_size = -1
         while time.time() - start_time < timeout:
+            # Windows: 周期性恢复焦点（前 15 秒内）
+            if prev_hwnd_poll and time.time() < focus_restore_until:
+                _win_restore_foreground(prev_hwnd_poll)
+
             if result_file.exists():
                 # 检查文件大小是否稳定（确保写入完成）
                 current_size = result_file.stat().st_size
