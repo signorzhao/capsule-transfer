@@ -1212,22 +1212,7 @@ function SettingsView({ networkInfo, apiBase }) {
     setDetecting(false);
   };
 
-  const handleBrowseReaper = async () => {
-    // 尝试用 Tauri 原生对话框
-    if (window.__TAURI_INTERNALS__) {
-      try {
-        const { open } = await import('@tauri-apps/plugin-dialog');
-        const selected = await open({
-          multiple: false,
-          filters: [{ name: 'REAPER', extensions: ['exe', 'app', ''] }],
-        });
-        if (selected) {
-          setReaperPath(selected);
-          return;
-        }
-      } catch {}
-    }
-    // 浏览器 fallback
+  const handleBrowseReaper = () => {
     const input = document.createElement('input');
     input.type = 'file';
     if (navigator.platform.toLowerCase().includes('win')) {
