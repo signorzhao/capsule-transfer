@@ -44,7 +44,6 @@
         "installMode": "currentUser"
       }
     },
-    "externalBin": ["binaries/flask-backend"],
     "resources": ["../data-pipeline/**/*"]
   },
   "plugins": {

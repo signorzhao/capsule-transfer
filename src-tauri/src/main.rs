@@ -7,8 +7,20 @@ use tauri::{
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_shell::ShellExt;
 use std::sync::Mutex;
+use std::fs;
+use std::io::Write;
 
 struct BackendChild(Mutex<Option<tauri_plugin_shell::process::CommandChild>>);
+
+fn log_to_file(msg: &str) {
+    if let Ok(mut f) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("capsule-debug.log")
+    {
+        let _ = writeln!(f, "{}", msg);
+    }
+}
 
 #[tauri::command]
 fn notify_new_capsule(app: tauri::AppHandle, sender: String) {
@@ -32,19 +44,38 @@ fn flash_taskbar(app: tauri::AppHandle) {
 }
 
 fn main() {
+    log_to_file("=== Sound Capsule starting ===");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![notify_new_capsule, flash_taskbar])
         .setup(|app| {
-            // 启动 Flask sidecar
+            log_to_file("Setup starting...");
+
+            // 尝试启动 Flask sidecar（失败不崩溃）
             let shell = app.shell();
-            let sidecar = shell.sidecar("flask-backend").expect("failed to create sidecar");
-            let (mut _rx, child) = sidecar.spawn().expect("failed to spawn sidecar");
-            app.manage(BackendChild(Mutex::new(Some(child))));
+            match shell.sidecar("flask-backend") {
+                Ok(sidecar) => {
+                    match sidecar.spawn() {
+                        Ok((_rx, child)) => {
+                            log_to_file("Flask sidecar started successfully");
+                            app.manage(BackendChild(Mutex::new(Some(child))));
+                        }
+                        Err(e) => {
+                            log_to_file(&format!("Failed to spawn sidecar: {}", e));
+                            app.manage(BackendChild(Mutex::new(None)));
+                        }
+                    }
+                }
+                Err(e) => {
+                    log_to_file(&format!("Failed to create sidecar command: {}", e));
+                    app.manage(BackendChild(Mutex::new(None)));
+                }
+            }
 
             // 系统托盘
-            let _tray = TrayIconBuilder::new()
+            let tray_result = TrayIconBuilder::new()
                 .tooltip("Sound Capsule")
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
@@ -61,8 +92,14 @@ fn main() {
                         }
                     }
                 })
-                .build(app)?;
+                .build(app);
 
+            match tray_result {
+                Ok(_) => log_to_file("Tray icon created"),
+                Err(e) => log_to_file(&format!("Tray icon failed: {}", e)),
+            }
+
+            log_to_file("Setup complete");
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -72,9 +109,10 @@ fn main() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("error while running tauri application")
+        .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                log_to_file("Application exiting, killing backend...");
                 let state = app_handle.state::<BackendChild>();
                 let mut guard = state.0.lock().unwrap();
                 if let Some(child) = guard.take() {
