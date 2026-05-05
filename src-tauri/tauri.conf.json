@@ -20,11 +20,6 @@
         "center": true
       }
     ],
-    "trayIcon": {
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": true,
-      "tooltip": "CapsuleTransfer"
-    },
     "security": {
       "csp": null
     }

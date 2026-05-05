@@ -1,10 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri::{
-    menu::{Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
-};
+use tauri::Manager;
 use tauri_plugin_notification::NotificationExt;
 use std::process::{Child, Command};
 use std::sync::Mutex;
@@ -26,6 +22,21 @@ fn find_backend_exe(app: &tauri::App) -> Option<PathBuf> {
             }
         }
     }
+
+    // 绿色版：exe 同目录下查找
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let p = exe_dir.join("flask-backend.exe");
+            if p.exists() {
+                return Some(p);
+            }
+            let p = exe_dir.join("flask-backend");
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+
     None
 }
 
@@ -82,59 +93,12 @@ fn main() {
         .setup(|app| {
             let child = start_backend(app);
             if child.is_some() {
-                eprintln!("[Sound Capsule] Flask backend started");
+                eprintln!("[CapsuleTransfer] Flask backend started");
             } else {
-                eprintln!("[Sound Capsule] No bundled backend, expecting manual Flask");
+                eprintln!("[CapsuleTransfer] No bundled backend, expecting manual Flask");
             }
             app.manage(BackendProcess(Mutex::new(child)));
-
-            // 托盘右键菜单
-            let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
-
-            let _tray = TrayIconBuilder::new()
-                .tooltip("Sound Capsule")
-                .menu(&tray_menu)
-                .on_menu_event(|app, event| {
-                    match event.id().as_ref() {
-                        "show" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.unminimize();
-                                let _ = window.set_focus();
-                            }
-                        }
-                        "quit" => {
-                            app.exit(0);
-                        }
-                        _ => {}
-                    }
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.unminimize();
-                            let _ = window.set_focus();
-                        }
-                    }
-                })
-                .build(app)?;
-
             Ok(())
-        })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
-            }
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
