@@ -1234,12 +1234,13 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
     
     -- 替换媒体路径为 Audio/文件名
     reaper.ShowConsoleMsg("替换媒体路径...\n")
+    local sourceMediaFolder = GetProjectMediaFolderName()
     local replacedCount = 0
     
     for origPath, newPath in pairs(pathMapping) do
         local baseName = string.match(origPath, "([^/\\]+)$")
-        -- 搜索所有可能出现在 RPP 中的路径格式
-        local pathVariants = { origPath, "Audio/" .. baseName, "Audio\\" .. baseName, baseName }
+        -- 搜索所有可能出现在 RPP 中的路径格式（包括源工程的媒体文件夹名）
+        local pathVariants = { origPath, sourceMediaFolder .. "/" .. baseName, sourceMediaFolder .. "\\" .. baseName, "Audio/" .. baseName, "Audio\\" .. baseName, baseName }
         
         for _, variant in ipairs(pathVariants) do
             local escaped = variant:gsub("([%(%)%.%+%-%*%?%[%^%$%%])", "%%%1")
@@ -1254,7 +1255,8 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
     end
     reaper.ShowConsoleMsg("共替换 " .. replacedCount .. " 处路径\n")
     
-    -- 将剩余的相对媒体路径转为绝对路径（避免渲染时弹出"丢失媒体"对话框）
+    -- 将剩余的相对媒体路径转为绝对路径或 Audio/ 相对路径
+    -- 优先检查文件是否已在胶囊 Audio 目录中，是则用相对路径（跨平台可移植）
     local currentProjDir2 = GetDirectoryPath(currentProjPath)
     if currentProjDir2 and currentProjDir2 ~= "" then
         content = content:gsub('(FILE%s+")([^"]-)"', function(prefix, filePath)
@@ -1262,14 +1264,24 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
             if filePath:match("^/") or filePath:match("^[A-Za-z]:") or filePath:match("^\\\\") or filePath:match("^Audio/") or filePath:match("^Audio\\") then
                 return prefix .. filePath .. '"'
             end
-            -- 将相对路径转为绝对路径
+            -- 提取文件名，检查是否已存在于胶囊 Audio 目录
+            local fName = filePath:match("([^/\\]+)$")
+            if fName then
+                local audioPath = JoinPath(outputDir, "Audio", fName)
+                local f = io.open(audioPath, "r")
+                if f then
+                    f:close()
+                    return prefix .. "Audio/" .. fName .. '"'
+                end
+            end
+            -- 不在 Audio 目录中，转为绝对路径（本机渲染用）
             local absPath = currentProjDir2 .. "/" .. filePath
             if IsWindows() then
                 absPath = currentProjDir2 .. "\\" .. filePath:gsub("/", "\\")
             end
             return prefix .. absPath .. '"'
         end)
-        reaper.ShowConsoleMsg("已将剩余相对路径转为绝对路径\n")
+        reaper.ShowConsoleMsg("已处理剩余相对路径\n")
     end
 
     -- 设置渲染参数（OGG 格式，按时间选区渲染）
