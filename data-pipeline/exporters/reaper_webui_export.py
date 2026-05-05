@@ -390,32 +390,28 @@ class ReaperWebUIExporter:
 
                 print(f"✓ 执行命令: {' '.join(cmd)}")
 
-                # CREATE_NO_WINDOW + SW_HIDE 防止 CMD 窗口闪现
+                # 用 Popen 非阻塞发送命令（不等待 REAPER 进程返回）
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 startupinfo.wShowWindow = 0  # SW_HIDE
-                result = subprocess.run(
+                proc = subprocess.Popen(
                     cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     creationflags=subprocess.CREATE_NO_WINDOW,
                     startupinfo=startupinfo
                 )
 
+                # 短暂等待确认进程已启动
+                time.sleep(0.5)
+
                 # 确保 REAPER 仍然最小化
                 _win_keep_reaper_minimized(reaper_hwnd)
 
-                print(f"✓ REAPER 命令已发送")
-                print(f"  返回码: {result.returncode}")
-                if result.stdout:
-                    print(f"  标准输出: {result.stdout}")
-                if result.stderr:
-                    print(f"  标准错误: {result.stderr}")
+                print(f"✓ REAPER 命令已发送（非阻塞，PID: {proc.pid}）")
 
             else:
-                # macOS / Linux: 与 Windows 一致，必须用 -nonewinst 把脚本送进**当前** REAPER 实例。
-                # 使用 open / NSWorkspace 打开 .lua 容易拉起新实例或错误关联工程，常见表现为「意外退出」。
+                # macOS / Linux: 用 -nonewinst 把脚本送进当前 REAPER 实例
                 print(f"✓ {system} 平台，使用 REAPER -nonewinst 执行脚本...")
 
                 reaper_cmd = self._find_reaper_executable()
@@ -427,37 +423,20 @@ class ReaperWebUIExporter:
 
                 print(f"✓ REAPER 路径: {reaper_cmd}")
 
-                # 只传脚本路径，与 Windows 一致。不要附带 /tmp 里缓存的 .rpp：
-                # 缓存可能是上一次捕获的旧工程，-nonewinst 强行打开会切换/重载工程，
-                # 极易导致崩溃或「意外退出」；脚本应在用户当前已打开的工程中执行。
                 cmd = [str(reaper_cmd), "-nonewinst", str(script_path)]
 
                 print(f"✓ 执行命令: {' '.join(cmd)}")
 
-                result = subprocess.run(
+                # 非阻塞发送命令
+                proc = subprocess.Popen(
                     cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
 
-                print(f"✓ REAPER 命令已发送")
-                print(f"  返回码: {result.returncode}")
-                if result.stdout:
-                    print(f"  标准输出: {result.stdout}")
-                if result.stderr:
-                    print(f"  标准错误: {result.stderr}")
-                if result.returncode != 0:
-                    print(
-                        f"⚠️  REAPER 进程返回码 {result.returncode}（-nonewinst 有时仍非零）；"
-                        "若未执行导出，请确认本机已打开 REAPER 且「设置 → REAPER 路径」指向正确。"
-                    )
+                time.sleep(0.5)
+                print(f"✓ REAPER 命令已发送（非阻塞，PID: {proc.pid}）")
 
-        except subprocess.TimeoutExpired:
-            return {
-                'success': False,
-                'error': 'REAPER 命令行调用超时，请确认本机已安装 REAPER 且路径正确'
-            }
         except Exception as e:
             return {
                 'success': False,
