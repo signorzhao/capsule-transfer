@@ -38,6 +38,7 @@ jobs:
       - name: Install Python Dependencies
         run: |
           pip install -r server/requirements.txt
+          pip install pythonnet clr_loader
           pip install pyinstaller
 
       - name: Package with PyInstaller
