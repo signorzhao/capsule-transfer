@@ -2879,53 +2879,39 @@ function ExportCapsule()
     -- 步骤 4：生成 metadata.json
     GenerateCapsuleMetadata(outputDir, capsuleName, capsuleType, collectedItemsInfo, mediaFiles, failedFiles)
     
-    -- 步骤 5：渲染预览音频（使用 -renderproject 命令）
+    -- 步骤 5：渲染预览音频（在当前 Reaper 实例内完成，不启动新进程，不切换窗口）
     if exportPreview then
-        reaper.ShowConsoleMsg("\n=== 渲染预览音频 ===\n")
-        
-        local reaperPath = nil
-        if IsWindows() then
-            local possiblePaths = {
-                "C:\\Program Files\\REAPER (x64)\\reaper.exe",
-                "C:\\Program Files\\REAPER (arm64)\\reaper.exe",
-                "C:\\Program Files\\REAPER\\reaper.exe",
-                "C:\\Program Files (x86)\\REAPER\\reaper.exe",
-            }
-            for _, path in ipairs(possiblePaths) do
-                local f = io.open(path, "r")
-                if f then
-                    f:close()
-                    reaperPath = path
+        reaper.ShowConsoleMsg("\n=== 渲染预览音频（进程内渲染）===\n")
+
+        -- 记住当前工程
+        local origProj = reaper.EnumProjects(-1)
+        reaper.ShowConsoleMsg("  已记录原工程\n")
+
+        -- 先创建新标签页（空工程），再加载胶囊 RPP，避免覆盖用户的原工程
+        reaper.Main_OnCommand(41929, 0)  -- "File: New project tab (ignore default template)"
+        reaper.Main_openProject(rppPath)
+        reaper.ShowConsoleMsg("  已在新标签页打开胶囊 RPP: " .. rppPath .. "\n")
+
+        -- 用 RPP 内嵌的设置渲染，自动关闭渲染对话框（action 42230）
+        reaper.ShowConsoleMsg("  开始渲染...\n")
+        reaper.Main_OnCommand(42230, 0)
+        reaper.ShowConsoleMsg("  渲染命令已执行\n")
+
+        -- 关闭渲染用的工程标签页（不保存）
+        reaper.Main_OnCommand(40860, 0)  -- "File: Close current project tab"
+
+        -- 切回原来的工程
+        if reaper.EnumProjects(-1) ~= origProj then
+            for i = 0, 99 do
+                local proj = reaper.EnumProjects(i)
+                if not proj then break end
+                if proj == origProj then
+                    reaper.SelectProjectInstance(proj)
                     break
                 end
             end
         end
-        
-        if reaperPath then
-            local winRppPath = rppPath:gsub("/", "\\")
-            -- 使用 VBS 脚本静默启动渲染进程，避免 CMD 窗口闪现和焦点切换
-            -- -renderproject 需要独立新进程（不能用 -nonewinst）
-            local vbsPath = JoinPath(outputDir, "_render.vbs")
-            local vbsContent = string.format(
-                'Set WshShell = CreateObject("WScript.Shell")\r\nWshShell.Run """%s"" -renderproject ""%s"" -nosplash", 0, False',
-                reaperPath, winRppPath
-            )
-            local vf = io.open(vbsPath, "w")
-            if vf then
-                vf:write(vbsContent)
-                vf:close()
-                os.execute('wscript "' .. vbsPath .. '"')
-                os.remove(vbsPath)
-                reaper.ShowConsoleMsg("✓ 渲染已在后台静默启动\n")
-            else
-                -- VBS 写入失败，回退到 start /B（可能闪一下 CMD）
-                local renderCmd = string.format('start /B "" "%s" -renderproject "%s" -nosplash', reaperPath, winRppPath)
-                os.execute(renderCmd)
-                reaper.ShowConsoleMsg("✓ 渲染已在后台启动（回退方式）\n")
-            end
-        else
-            reaper.ShowConsoleMsg("⚠ 未找到 REAPER，请手动渲染\n")
-        end
+        reaper.ShowConsoleMsg("✓ OGG 渲染已完成，已切回原工程\n")
     end
     
     -- 完成
