@@ -1057,7 +1057,50 @@ def update_settings():
             cfg["receive_mode"] = mode
             _set_receive_mode(mode)
     save_config(cfg)
+    _sync_config_to_user_dir(cfg)
     return _ok(cfg)
+
+
+def _sync_config_to_user_dir(cfg: dict):
+    """同步配置到用户目录（供 reaper_webui_export 等模块读取）"""
+    try:
+        if platform.system() == "Darwin":
+            user_cfg_dir = Path.home() / "Library/Application Support/com.soundcapsule.app"
+        elif platform.system() == "Windows":
+            user_cfg_dir = Path.home() / "AppData/Roaming/com.soundcapsule.app"
+        else:
+            user_cfg_dir = Path.home() / ".config/com.soundcapsule.app"
+        user_cfg_dir.mkdir(parents=True, exist_ok=True)
+        user_cfg_file = user_cfg_dir / "config.json"
+        user_cfg_file.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning("同步用户配置失败: %s", e)
+
+
+@app.route("/api/settings/detect-reaper", methods=["GET"])
+def detect_reaper():
+    """自动检测 Reaper 路径"""
+    if platform.system() == "Windows":
+        candidates = [
+            Path("C:/Program Files/REAPER (x64)/reaper.exe"),
+            Path("C:/Program Files/REAPER (arm64)/reaper.exe"),
+            Path("C:/Program Files/REAPER/reaper.exe"),
+            Path("C:/Program Files (x86)/REAPER/reaper.exe"),
+            Path.home() / "AppData/Local/Programs/REAPER/reaper.exe",
+        ]
+    elif platform.system() == "Darwin":
+        candidates = [
+            Path("/Applications/REAPER.app"),
+            Path("/Applications/REAPER64.app"),
+            Path.home() / "Applications/REAPER.app",
+        ]
+    else:
+        candidates = [Path("/usr/bin/reaper")]
+
+    for p in candidates:
+        if p.exists():
+            return _ok({"found": True, "path": str(p)})
+    return _ok({"found": False, "path": ""})
 
 
 # ---------------------- 入口 ----------------------

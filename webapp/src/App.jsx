@@ -1184,14 +1184,63 @@ function SettingsView({ networkInfo, apiBase }) {
   const [settings, setSettings] = useState(null);
   const [reaperPath, setReaperPath] = useState('');
   const [saving, setSaving] = useState(false);
+  const [detecting, setDetecting] = useState(false);
   const toast = useToast();
 
   useEffect(() => {
     api.getSettings().then((r) => {
       setSettings(r.data);
-      setReaperPath(r.data?.reaper_path || '');
+      const savedPath = r.data?.reaper_path || '';
+      setReaperPath(savedPath);
+      if (!savedPath) {
+        autoDetectReaper();
+      }
     }).catch(() => {});
   }, []);
+
+  const autoDetectReaper = async () => {
+    setDetecting(true);
+    try {
+      const resp = await fetch(`${api.base}/settings/detect-reaper`);
+      const r = await resp.json();
+      if (r.data?.found && r.data.path) {
+        setReaperPath(r.data.path);
+        await api.updateSettings({ reaper_path: r.data.path });
+        toast.success(`已自动检测到 Reaper：${r.data.path}`);
+      }
+    } catch {}
+    setDetecting(false);
+  };
+
+  const handleBrowseReaper = async () => {
+    // 尝试用 Tauri 原生对话框
+    if (window.__TAURI_INTERNALS__) {
+      try {
+        const { open } = await import('@tauri-apps/plugin-dialog');
+        const selected = await open({
+          multiple: false,
+          filters: [{ name: 'REAPER', extensions: ['exe', 'app', ''] }],
+        });
+        if (selected) {
+          setReaperPath(selected);
+          return;
+        }
+      } catch {}
+    }
+    // 浏览器 fallback
+    const input = document.createElement('input');
+    input.type = 'file';
+    if (navigator.platform.toLowerCase().includes('win')) {
+      input.accept = '.exe';
+    }
+    input.onchange = (e) => {
+      const file = e.target.files?.[0];
+      if (file) {
+        setReaperPath(file.path || file.name);
+      }
+    };
+    input.click();
+  };
 
   const handleSaveReaperPath = async () => {
     setSaving(true);
@@ -1212,24 +1261,45 @@ function SettingsView({ networkInfo, apiBase }) {
 
       <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 mb-6">
         <h3 className="text-sm font-bold text-slate-200 mb-4">Reaper 路径</h3>
-        <div className="flex items-center space-x-3">
+        <div className="flex items-center space-x-2">
           <input
             value={reaperPath}
             onChange={(e) => setReaperPath(e.target.value)}
-            placeholder="例如：/Applications/REAPER.app 或留空自动检测"
+            placeholder="请选择 reaper.exe 的路径"
             className="flex-1 bg-[#0f1115] border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-indigo-500"
+            readOnly
           />
           <button
+            onClick={handleBrowseReaper}
+            className="px-3 py-2 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg whitespace-nowrap"
+          >
+            浏览…
+          </button>
+          <button
+            onClick={autoDetectReaper}
+            disabled={detecting}
+            className="px-3 py-2 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg disabled:opacity-40 whitespace-nowrap"
+          >
+            {detecting ? '检测中…' : '自动检测'}
+          </button>
+          <button
             onClick={handleSaveReaperPath}
-            disabled={saving}
-            className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg disabled:opacity-40"
+            disabled={saving || !reaperPath}
+            className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg disabled:opacity-40 whitespace-nowrap"
           >
             {saving ? '保存中…' : '保存'}
           </button>
         </div>
-        <p className="text-xs text-slate-500 mt-2">
-          macOS 填 .app 路径即可（如 /Applications/REAPER.app），程序会自动解析到可执行文件。
-        </p>
+        {!reaperPath && (
+          <p className="text-xs text-amber-400 mt-2">
+            ⚠️ 未设置 Reaper 路径，保存胶囊功能将不可用。请点击"浏览"选择 reaper.exe 或点击"自动检测"。
+          </p>
+        )}
+        {reaperPath && (
+          <p className="text-xs text-emerald-400 mt-2">
+            ✓ 当前路径：{reaperPath}
+          </p>
+        )}
       </div>
 
       <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 space-y-3 text-sm">

@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use tauri::{
+    menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WindowEvent,
 };
@@ -12,7 +13,6 @@ use std::path::PathBuf;
 struct BackendProcess(Mutex<Option<Child>>);
 
 fn find_backend_exe(app: &tauri::App) -> Option<PathBuf> {
-    // 生产模式：在 resource 目录下查找
     if let Ok(resource_dir) = app.path().resource_dir() {
         let candidates = [
             resource_dir.join("binaries").join("flask-backend.exe"),
@@ -26,14 +26,11 @@ fn find_backend_exe(app: &tauri::App) -> Option<PathBuf> {
             }
         }
     }
-
-    // 开发模式下不查找，用户手动启动 Flask
     None
 }
 
 fn start_backend(app: &tauri::App) -> Option<Child> {
     let exe_path = find_backend_exe(app)?;
-
     let work_dir = exe_path.parent()?;
 
     #[cfg(target_os = "windows")]
@@ -83,18 +80,37 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![notify_new_capsule, flash_taskbar])
         .setup(|app| {
-            // 尝试启动 Flask 后端（生产模式有 exe，开发模式用户手动启动）
             let child = start_backend(app);
             if child.is_some() {
-                eprintln!("[Sound Capsule] Flask backend started from bundled binary");
+                eprintln!("[Sound Capsule] Flask backend started");
             } else {
-                eprintln!("[Sound Capsule] No bundled backend found, expecting manual Flask start");
+                eprintln!("[Sound Capsule] No bundled backend, expecting manual Flask");
             }
             app.manage(BackendProcess(Mutex::new(child)));
 
-            // 系统托盘
-            let _ = TrayIconBuilder::new()
+            // 托盘右键菜单
+            let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+            let _tray = TrayIconBuilder::new()
                 .tooltip("Sound Capsule")
+                .menu(&tray_menu)
+                .on_menu_event(|app, event| {
+                    match event.id().as_ref() {
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
@@ -110,7 +126,7 @@ fn main() {
                         }
                     }
                 })
-                .build(app);
+                .build(app)?;
 
             Ok(())
         })
