@@ -43,6 +43,12 @@ jobs:
       - name: Package with PyInstaller
         run: pyinstaller capsule-transfer.spec
 
+      - name: Copy server modules into package
+        run: |
+          Copy-Item server/app.py dist/CapsuleTransfer/server/
+          Copy-Item server/bundle.py dist/CapsuleTransfer/server/
+          Copy-Item server/net.py dist/CapsuleTransfer/server/
+
       - name: Copy frontend dist into package
         run: |
           Copy-Item -Recurse webapp/dist dist/CapsuleTransfer/webapp
@@ -54,18 +60,6 @@ jobs:
       - name: Create data directory
         run: |
           New-Item -ItemType Directory -Force dist/CapsuleTransfer/data/capsules
-
-      - name: Create launcher script
-        run: |
-          @"
-          Set WshShell = CreateObject("WScript.Shell")
-          Set fso = CreateObject("Scripting.FileSystemObject")
-          appDir = fso.GetParentFolderName(WScript.ScriptFullName)
-          WshShell.CurrentDirectory = appDir
-          WshShell.Run """" & appDir & "\CapsuleTransfer.exe""", 0, False
-          WScript.Sleep 2500
-          WshShell.Run "http://localhost:5005", 1, False
-          "@ | Out-File -Encoding ascii dist/CapsuleTransfer/启动.vbs
 
       - name: Create ZIP archive
         run: |

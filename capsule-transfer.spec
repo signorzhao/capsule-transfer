@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec 文件 —— 打包 Sound Capsule LAN 为绿色版可执行文件。
+"""PyInstaller spec 文件 —— 打包 Sound Capsule LAN 为绿色版桌面应用。
 
 使用方法：
     cd capsule-transfer
@@ -18,7 +18,7 @@ block_cipher = None
 ROOT = Path(os.getcwd())
 
 a = Analysis(
-    [str(ROOT / 'server' / 'app.py')],
+    [str(ROOT / 'main.py')],
     pathex=[str(ROOT / 'server'), str(ROOT / 'data-pipeline')],
     binaries=[],
     datas=[
@@ -27,13 +27,16 @@ a = Analysis(
         # data-pipeline 模块
         (str(ROOT / 'data-pipeline'), 'data-pipeline'),
         # 服务端辅助模块
-        (str(ROOT / 'server' / 'bundle.py'), '.'),
-        (str(ROOT / 'server' / 'net.py'), '.'),
+        (str(ROOT / 'server' / 'app.py'), 'server'),
+        (str(ROOT / 'server' / 'bundle.py'), 'server'),
+        (str(ROOT / 'server' / 'net.py'), 'server'),
     ],
     hiddenimports=[
         'flask',
         'flask_cors',
         'requests',
+        'webview',
+        'webview.platforms.edgechromium',
     ],
     hookspath=[],
     hooksconfig={},
