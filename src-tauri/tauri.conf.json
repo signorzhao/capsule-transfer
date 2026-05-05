@@ -46,12 +46,6 @@
     },
     "resources": ["../data-pipeline/**/*"]
   },
-  "plugins": {
-    "notification": {
-      "all": true
-    },
-    "shell": {
-      "all": true
-    }
-  }
+  "plugins": {}
+
 }
