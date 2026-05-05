@@ -162,28 +162,41 @@ class ReaperWebUIExporter:
         import platform
         system = platform.system()
         
-        # 1. 优先读取用户配置
+        # 1. 优先读取用户配置（检查新旧两个位置）
+        config_candidates = []
+        if system == "Darwin":
+            config_candidates = [
+                Path.home() / "Library/Application Support/CapsuleTransfer/config.json",
+                Path.home() / "Library/Application Support/com.soundcapsule.app/config.json",
+            ]
+        elif system == "Windows":
+            appdata = os.environ.get("APPDATA", str(Path.home() / "AppData/Roaming"))
+            config_candidates = [
+                Path(appdata) / "CapsuleTransfer/config.json",
+                Path(appdata) / "com.soundcapsule.app/config.json",
+            ]
+        else:
+            config_candidates = [
+                Path.home() / ".config/CapsuleTransfer/config.json",
+                Path.home() / ".config/com.soundcapsule.app/config.json",
+            ]
+
         try:
-            if system == "Darwin":
-                config_path = Path.home() / "Library/Application Support/com.soundcapsule.app/config.json"
-            elif system == "Windows":
-                config_path = Path.home() / "AppData/Roaming/com.soundcapsule.app/config.json"
-            else:
-                config_path = Path.home() / ".config/com.soundcapsule.app/config.json"
-            
-            if config_path.exists():
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                    reaper_path = config.get('reaper_path')
-                    if reaper_path:
-                        reaper_exe = Path(reaper_path)
-                        if reaper_exe.is_dir() and reaper_exe.suffix == '.app':
-                            reaper_exe = reaper_exe / "Contents" / "MacOS" / "REAPER"
-                        if reaper_exe.exists() and reaper_exe.is_file():
-                            print(f"✓ 使用用户配置的 REAPER 路径: {reaper_exe}")
-                            return reaper_exe
-                        else:
-                            print(f"⚠️ 用户配置的 REAPER 路径不存在: {reaper_path}")
+            for config_path in config_candidates:
+                if config_path.exists():
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                        reaper_path = config.get('reaper_path')
+                        if reaper_path:
+                            reaper_exe = Path(reaper_path)
+                            if reaper_exe.is_dir() and reaper_exe.suffix == '.app':
+                                reaper_exe = reaper_exe / "Contents" / "MacOS" / "REAPER"
+                            if reaper_exe.exists() and reaper_exe.is_file():
+                                print(f"✓ 使用用户配置的 REAPER 路径: {reaper_exe}")
+                                return reaper_exe
+                            else:
+                                print(f"⚠️ 用户配置的 REAPER 路径不存在: {reaper_path}")
+                    break
         except Exception as e:
             print(f"⚠️ 读取 REAPER 配置失败: {e}")
         
