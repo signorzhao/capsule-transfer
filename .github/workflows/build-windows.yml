@@ -58,19 +58,14 @@ jobs:
       - name: Create launcher script
         run: |
           @"
-          @echo off
-          cd /d "%~dp0"
-          start /B "" "%~dp0CapsuleTransfer.exe" >nul 2>&1
-          echo 正在启动 Sound Capsule...
-          timeout /t 3 /nobreak >nul
-          start "" http://localhost:5005
-          echo.
-          echo Sound Capsule 已启动！浏览器将自动打开。
-          echo 关闭此窗口将停止服务。
-          echo.
-          pause
-          taskkill /F /IM CapsuleTransfer.exe >nul 2>&1
-          "@ | Out-File -Encoding ascii dist/CapsuleTransfer/启动.bat
+          Set WshShell = CreateObject("WScript.Shell")
+          Set fso = CreateObject("Scripting.FileSystemObject")
+          appDir = fso.GetParentFolderName(WScript.ScriptFullName)
+          WshShell.CurrentDirectory = appDir
+          WshShell.Run """" & appDir & "\CapsuleTransfer.exe""", 0, False
+          WScript.Sleep 2500
+          WshShell.Run "http://localhost:5005", 1, False
+          "@ | Out-File -Encoding ascii dist/CapsuleTransfer/启动.vbs
 
       - name: Create ZIP archive
         run: |
