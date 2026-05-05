@@ -2903,11 +2903,26 @@ function ExportCapsule()
         
         if reaperPath then
             local winRppPath = rppPath:gsub("/", "\\")
-            -- -nosplash: 不显示启动画面; -nonewinst: 不创建新实例窗口; start /B: 后台运行不抢焦点
-            local renderCmd = string.format('start /B "" "%s" -renderproject "%s" -nosplash -nonewinst', reaperPath, winRppPath)
-            reaper.ShowConsoleMsg("渲染命令: " .. renderCmd .. "\n")
-            os.execute(renderCmd)
-            reaper.ShowConsoleMsg("✓ 渲染已在后台启动\n")
+            -- 使用 VBS 脚本静默启动渲染进程，避免 CMD 窗口闪现和焦点切换
+            -- -renderproject 需要独立新进程（不能用 -nonewinst）
+            local vbsPath = JoinPath(outputDir, "_render.vbs")
+            local vbsContent = string.format(
+                'Set WshShell = CreateObject("WScript.Shell")\r\nWshShell.Run """%s"" -renderproject ""%s"" -nosplash", 0, False',
+                reaperPath, winRppPath
+            )
+            local vf = io.open(vbsPath, "w")
+            if vf then
+                vf:write(vbsContent)
+                vf:close()
+                os.execute('wscript "' .. vbsPath .. '"')
+                os.remove(vbsPath)
+                reaper.ShowConsoleMsg("✓ 渲染已在后台静默启动\n")
+            else
+                -- VBS 写入失败，回退到 start /B（可能闪一下 CMD）
+                local renderCmd = string.format('start /B "" "%s" -renderproject "%s" -nosplash', reaperPath, winRppPath)
+                os.execute(renderCmd)
+                reaper.ShowConsoleMsg("✓ 渲染已在后台启动（回退方式）\n")
+            end
         else
             reaper.ShowConsoleMsg("⚠ 未找到 REAPER，请手动渲染\n")
         end

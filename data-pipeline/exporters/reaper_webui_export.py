@@ -15,55 +15,6 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 
-def run_lua_on_mac_safely(lua_script_path: str) -> tuple:
-    """
-    在 macOS 上让 REAPER 执行 Lua 脚本，**完全不切换窗口焦点**。
-
-    使用 NSWorkspace.openURLs(activates=False)，这是 macOS 唯一能保证
-    不激活目标 App 窗口的方式。通过系统 Python3（自带 pyobjc bridge）调用。
-    返回 (success: bool, stderr_or_none: Optional[str])
-    """
-    abs_path = os.path.abspath(lua_script_path)
-
-    # 用系统 /usr/bin/python3 调用 NSWorkspace（自带 AppKit bridge）
-    py_code = f'''
-import sys
-try:
-    from AppKit import NSWorkspace, NSWorkspaceOpenConfiguration, NSURL
-    config = NSWorkspaceOpenConfiguration.alloc().init()
-    config.setActivates_(False)
-    ws = NSWorkspace.sharedWorkspace()
-    file_url = NSURL.fileURLWithPath_("{abs_path}")
-    app_url = NSURL.fileURLWithPath_("/Applications/REAPER.app")
-    ws.openURLs_withApplicationAtURL_configuration_completionHandler_([file_url], app_url, config, None)
-    import time; time.sleep(0.3)
-except Exception as e:
-    print("NSWorkspace failed: " + str(e), file=sys.stderr)
-    sys.exit(1)
-'''
-    print(f"macOS: 通过 NSWorkspace(activates=False) 后台触发 Lua 脚本")
-    try:
-        result = subprocess.run(
-            ["/usr/bin/python3", "-c", py_code],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode == 0:
-            print("✓ NSWorkspace 触发成功（焦点不变）")
-            return True, None
-        # NSWorkspace 失败，回退 open -g（会短暂闪一下）
-        print(f"⚠ NSWorkspace 失败: {result.stderr.strip()}，回退 open -g")
-    except Exception as e:
-        print(f"⚠ NSWorkspace 调用异常: {e}，回退 open -g")
-
-    # 回退方案
-    try:
-        subprocess.run(["open", "-g", "-a", "REAPER", abs_path], check=True, timeout=10)
-        print("✓ 回退 open -g 已发送")
-        return True, None
-    except Exception as e2:
-        return False, str(e2)
-
-
 def get_export_temp_dir() -> Path:
     """
     获取跨平台的临时导出目录
@@ -316,17 +267,11 @@ class ReaperWebUIExporter:
             "export_dir": export_dir  # 添加导出目录到配置
         }
 
-        if not self.prepare_export_config(config):
-            return {
-                'success': False,
-                'error': '准备配置失败'
-            }
-
-        # 3. 调用 REAPER 执行导出脚本
+        # 3. 调用 REAPER 执行导出脚本（先解析 PathManager，把主脚本绝对路径写入配置供 Lua loadfile）
         from common import PathManager
         import platform
         pm = PathManager.get_instance()
-        
+
         # Windows 使用专用脚本
         if platform.system() == "Windows":
             script_path = pm.get_lua_script("auto_export_from_config_windows.lua")
@@ -339,16 +284,30 @@ class ReaperWebUIExporter:
                 'error': f'Lua 脚本不存在: {script_path}'
             }
 
+        main_lua = pm.get_lua_script("main_export2.lua")
+        if main_lua.exists():
+            try:
+                config["main_export_lua"] = sanitize_path_for_lua(str(main_lua.resolve()))
+            except ValueError:
+                config["main_export_lua"] = str(main_lua).replace("\\", "/")
+        else:
+            config["main_export_lua"] = ""
+
+        if not self.prepare_export_config(config):
+            return {
+                'success': False,
+                'error': '准备配置失败'
+            }
+
         print(f"✓ 准备执行 Lua 脚本: {script_path}")
 
         try:
-            import platform
             system = platform.system()
-            
+
             if system == "Windows":
                 # Windows: 直接用 REAPER 命令行执行脚本
                 print(f"✓ Windows 平台，使用命令行方式执行脚本...")
-                
+
                 # 查找 REAPER 可执行文件
                 reaper_cmd = self._find_reaper_executable()
                 if not reaper_cmd:
@@ -356,17 +315,17 @@ class ReaperWebUIExporter:
                         'success': False,
                         'error': '找不到 REAPER 可执行文件，请在设置中配置 REAPER 路径'
                     }
-                
+
                 print(f"✓ REAPER 路径: {reaper_cmd}")
-                
+
                 # Windows 上使用 -nonewinst 在现有实例中执行脚本
                 # 注意：脚本路径需要使用 Windows 格式
                 script_path_win = str(script_path).replace('/', '\\')
                 cmd = [str(reaper_cmd), "-nonewinst", script_path_win]
-                
+
                 print(f"✓ 执行命令: {' '.join(cmd)}")
-                
-                # CREATE_NO_WINDOW 防止 console 窗口闪现; SW_HIDE 进一步隐藏
+
+                # CREATE_NO_WINDOW + SW_HIDE 防止 CMD 窗口闪现抢焦点
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 startupinfo.wShowWindow = 0  # SW_HIDE
@@ -378,74 +337,58 @@ class ReaperWebUIExporter:
                     creationflags=subprocess.CREATE_NO_WINDOW,
                     startupinfo=startupinfo
                 )
-                
+
                 print(f"✓ REAPER 命令已发送")
                 print(f"  返回码: {result.returncode}")
                 if result.stdout:
                     print(f"  标准输出: {result.stdout}")
                 if result.stderr:
                     print(f"  标准错误: {result.stderr}")
-                    
+
             else:
-                # macOS: 使用系统 open -a REAPER script.lua（打开文件机制，无需 AppleScript）
-                print(f"✓ macOS 平台，使用 open -a REAPER 执行脚本...")
-                ok, err = run_lua_on_mac_safely(str(script_path))
-                if ok:
-                    print(f"✓ open 命令已发送")
-                else:
-                    print(f"✗ open 失败: {err}")
+                # macOS / Linux: 与 Windows 一致，必须用 -nonewinst 把脚本送进**当前** REAPER 实例。
+                # 使用 open / NSWorkspace 打开 .lua 容易拉起新实例或错误关联工程，常见表现为「意外退出」。
+                print(f"✓ {system} 平台，使用 REAPER -nonewinst 执行脚本...")
 
-                # 如果 open 失败，回退到命令行方法（优先带工程路径：在指定工程中运行脚本）
-                if not ok:
-                    print(f"⚠️  open 失败，尝试命令行方法...")
+                reaper_cmd = self._find_reaper_executable()
+                if not reaper_cmd:
+                    return {
+                        'success': False,
+                        'error': '找不到 REAPER 可执行文件，请在设置中配置 REAPER 路径，或安装到 /Applications/REAPER.app'
+                    }
 
-                    # 查找 REAPER 可执行文件
-                    import shutil
-                    reaper_cmd = shutil.which("reaper")
-                    if not reaper_cmd:
-                        # 尝试 macOS 默认路径
-                        reaper_cmd = "/Applications/REAPER.app/Contents/MacOS/REAPER"
-                        if not Path(reaper_cmd).exists():
-                            return {
-                                'success': False,
-                                'error': '找不到 REAPER 可执行文件'
-                            }
+                print(f"✓ REAPER 路径: {reaper_cmd}")
 
-                    print(f"✓ REAPER 路径: {reaper_cmd}")
+                # 只传脚本路径，与 Windows 一致。不要附带 /tmp 里缓存的 .rpp：
+                # 缓存可能是上一次捕获的旧工程，-nonewinst 强行打开会切换/重载工程，
+                # 极易导致崩溃或「意外退出」；脚本应在用户当前已打开的工程中执行。
+                cmd = [str(reaper_cmd), "-nonewinst", str(script_path)]
 
-                    # 优先使用缓存的工程路径：reaper -nonewinst project.rpp script.lua 可在该工程中运行脚本
-                    project_path_file = get_export_temp_dir() / "current_project_path.txt"
-                    cmd = [reaper_cmd, "-nonewinst", str(script_path)]
-                    if project_path_file.exists():
-                        try:
-                            project_path = project_path_file.read_text().strip()
-                            if project_path and Path(project_path).exists():
-                                cmd = [reaper_cmd, "-nonewinst", project_path, str(script_path)]
-                                print(f"✓ 使用缓存的工程路径: {project_path}")
-                        except Exception:
-                            pass
-                    if len(cmd) == 3:
-                        print(f"⚠️  无工程路径缓存，脚本将作为工程打开，可能无法获取选中 Item")
+                print(f"✓ 执行命令: {' '.join(cmd)}")
 
-                    print(f"✓ 执行命令: {' '.join(cmd)}")
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
 
-                    result = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=5  # 只等待5秒，-nonewinst会立即返回
-                    )
-
-                    print(f"✓ REAPER 命令已发送")
-                    print(f"  返回码: {result.returncode}")
+                print(f"✓ REAPER 命令已发送")
+                print(f"  返回码: {result.returncode}")
+                if result.stdout:
                     print(f"  标准输出: {result.stdout}")
-                    if result.stderr:
-                        print(f"  标准错误: {result.stderr}")
+                if result.stderr:
+                    print(f"  标准错误: {result.stderr}")
+                if result.returncode != 0:
+                    print(
+                        f"⚠️  REAPER 进程返回码 {result.returncode}（-nonewinst 有时仍非零）；"
+                        "若未执行导出，请确认本机已打开 REAPER 且「设置 → REAPER 路径」指向正确。"
+                    )
 
         except subprocess.TimeoutExpired:
             return {
                 'success': False,
-                'error': 'REAPER 执行超时 (5秒) - 但这可能正常，继续等待结果文件...'
+                'error': 'REAPER 命令行调用超时，请确认本机已安装 REAPER 且路径正确'
             }
         except Exception as e:
             return {
