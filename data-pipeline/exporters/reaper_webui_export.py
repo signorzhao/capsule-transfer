@@ -15,27 +15,51 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 
-def _win_restore_foreground(hwnd):
-    """Windows: 恢复指定窗口为前台窗口"""
+def _win_minimize_reaper():
+    """Windows: 找到 REAPER 主窗口并最小化，防止其在导出期间抢焦点。
+    返回窗口句柄以便后续恢复。"""
+    if platform.system() != "Windows":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+
+        # REAPER 主窗口类名为 "REAPERwnd"
+        hwnd = user32.FindWindowW("REAPERwnd", None)
+        if hwnd:
+            SW_MINIMIZE = 6
+            user32.ShowWindow(hwnd, SW_MINIMIZE)
+        return hwnd
+    except Exception:
+        return None
+
+
+def _win_keep_reaper_minimized(hwnd):
+    """Windows: 确保 REAPER 窗口保持最小化状态"""
     if not hwnd or platform.system() != "Windows":
         return
     try:
         import ctypes
         user32 = ctypes.windll.user32
-        user32.SetForegroundWindow(hwnd)
+        # IsIconic 检查窗口是否已最小化
+        if not user32.IsIconic(hwnd):
+            SW_MINIMIZE = 6
+            user32.ShowWindow(hwnd, SW_MINIMIZE)
     except Exception:
         pass
 
 
-def _win_get_foreground():
-    """Windows: 获取当前前台窗口句柄"""
-    if platform.system() != "Windows":
-        return None
+def _win_restore_reaper(hwnd):
+    """Windows: 恢复 REAPER 窗口（导出完成后可选调用）"""
+    if not hwnd or platform.system() != "Windows":
+        return
     try:
         import ctypes
-        return ctypes.windll.user32.GetForegroundWindow()
+        SW_RESTORE = 9
+        ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)
     except Exception:
-        return None
+        pass
 
 
 def get_export_temp_dir() -> Path:
@@ -326,6 +350,7 @@ class ReaperWebUIExporter:
 
         try:
             system = platform.system()
+            reaper_hwnd = None  # Windows 专用：REAPER 窗口句柄
 
             if system == "Windows":
                 # Windows: 直接用 REAPER 命令行执行脚本
@@ -341,17 +366,18 @@ class ReaperWebUIExporter:
 
                 print(f"✓ REAPER 路径: {reaper_cmd}")
 
+                # 导出前最小化 REAPER，使其在整个导出过程中保持后台
+                reaper_hwnd = _win_minimize_reaper()
+                if reaper_hwnd:
+                    print(f"✓ 已最小化 REAPER 窗口")
+
                 # Windows 上使用 -nonewinst 在现有实例中执行脚本
-                # 注意：脚本路径需要使用 Windows 格式
                 script_path_win = str(script_path).replace('/', '\\')
                 cmd = [str(reaper_cmd), "-nonewinst", script_path_win]
 
                 print(f"✓ 执行命令: {' '.join(cmd)}")
 
-                # 记录当前前台窗口，以便命令执行后恢复焦点
-                prev_hwnd = _win_get_foreground()
-
-                # CREATE_NO_WINDOW + SW_HIDE 防止 CMD 窗口闪现抢焦点
+                # CREATE_NO_WINDOW + SW_HIDE 防止 CMD 窗口闪现
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 startupinfo.wShowWindow = 0  # SW_HIDE
@@ -364,9 +390,8 @@ class ReaperWebUIExporter:
                     startupinfo=startupinfo
                 )
 
-                # REAPER 收到 -nonewinst 信号后可能抢焦点，立即恢复原来的前台窗口
-                time.sleep(0.3)
-                _win_restore_foreground(prev_hwnd)
+                # 确保 REAPER 仍然最小化
+                _win_keep_reaper_minimized(reaper_hwnd)
 
                 print(f"✓ REAPER 命令已发送")
                 print(f"  返回码: {result.returncode}")
@@ -439,16 +464,15 @@ class ReaperWebUIExporter:
         print(f"检查间隔: {check_interval} 秒")
         print(f"期望的胶囊名称前缀: {expected_capsule_name}")
 
-        # Windows: 在等待期间持续恢复前台窗口焦点（防止 REAPER 打开标签页/渲染时抢焦点）
-        focus_restore_until = start_time + 15  # 前 15 秒内每秒恢复一次
-        prev_hwnd_poll = _win_get_foreground() if system == "Windows" else None
+        # Windows: 在等待期间持续强制 REAPER 保持最小化
+        reaper_hwnd_for_poll = reaper_hwnd if system == "Windows" else None
 
         waited_time = 0
         last_file_size = -1
         while time.time() - start_time < timeout:
-            # Windows: 周期性恢复焦点（前 15 秒内）
-            if prev_hwnd_poll and time.time() < focus_restore_until:
-                _win_restore_foreground(prev_hwnd_poll)
+            # Windows: 每次循环强制 REAPER 最小化（防止打开标签页/渲染时弹出）
+            if reaper_hwnd_for_poll:
+                _win_keep_reaper_minimized(reaper_hwnd_for_poll)
 
             if result_file.exists():
                 # 检查文件大小是否稳定（确保写入完成）
