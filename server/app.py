@@ -1,11 +1,7 @@
-"""Sound Capsule LAN —— 本地 Flask 服务。
+"""Sound Capsule LAN —— 本地 Flask 服务（无数据库版本）。
 
-职责：
-    1. 维护本地胶囊库（SQLite + 文件目录）
-    2. 维护局域网联系人簿
-    3. 接收来自其他局域网设备的胶囊（POST /api/p2p/import）
-    4. 把本机胶囊发送给指定 IP/端口（POST /api/p2p/send）
-    5. 暴露本机网络信息，便于在 UI 上显示给对方
+所有胶囊数据基于文件系统 (manifest.json) 管理，联系人存储于 contacts.json。
+支持绿色版打包，所有路径相对于程序自身目录。
 """
 
 from __future__ import annotations
@@ -14,30 +10,46 @@ import io
 import json
 import logging
 import os
+import platform
 import shutil
+import subprocess
+import sys
+import threading
 import time
 import uuid as uuid_lib
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 
-import sys
-
 from bundle import build_bundle, extract_bundle
-from db import Database
 from net import network_info
 
+# ---------------------- 路径初始化（绿色版） ----------------------
+
+if getattr(sys, "frozen", False):
+    APP_DIR = Path(sys.executable).resolve().parent
+else:
+    APP_DIR = Path(__file__).resolve().parent
+
+DATA_DIR = APP_DIR / "data"
+CAPSULES_DIR = DATA_DIR / "capsules"
+CONTACTS_FILE = DATA_DIR / "contacts.json"
+CONFIG_FILE = APP_DIR / "config.json"
+
+CAPSULES_DIR.mkdir(parents=True, exist_ok=True)
+
 # 引用仓库内 data-pipeline 中的 Reaper 导出模块
-_DATA_PIPELINE = Path(__file__).resolve().parent.parent / "data-pipeline"
+_DATA_PIPELINE = APP_DIR.parent / "data-pipeline"
 if _DATA_PIPELINE.exists():
     sys.path.insert(0, str(_DATA_PIPELINE))
     try:
         from common import PathManager
         PathManager.initialize(
             config_dir=str(_DATA_PIPELINE),
-            export_dir=str(Path(__file__).resolve().parent / "data" / "capsules"),
+            export_dir=str(CAPSULES_DIR),
             resource_dir=str(_DATA_PIPELINE),
         )
     except Exception as _pm_err:
@@ -49,23 +61,168 @@ logging.basicConfig(
 )
 logger = logging.getLogger("lan-capsule")
 
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = Path(os.getenv("LAN_CAPSULE_DATA_DIR", BASE_DIR / "data"))
-CAPSULES_DIR = DATA_DIR / "capsules"
-DB_PATH = DATA_DIR / "capsules.db"
-CAPSULES_DIR.mkdir(parents=True, exist_ok=True)
 
-PORT = int(os.getenv("LAN_CAPSULE_PORT", "5005"))
-HOST = os.getenv("LAN_CAPSULE_HOST", "0.0.0.0")
-SHARED_TOKEN = os.getenv("LAN_CAPSULE_SHARED_TOKEN", "").strip()
+# ---------------------- 配置管理 ----------------------
 
-db = Database(DB_PATH)
+def load_config() -> dict:
+    if CONFIG_FILE.exists():
+        try:
+            return json.loads(CONFIG_FILE.read_text("utf-8"))
+        except Exception:
+            pass
+    return {}
 
-app = Flask(__name__)
+
+def save_config(cfg: dict):
+    CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+_config = load_config()
+PORT = int(os.getenv("LAN_CAPSULE_PORT", _config.get("port", 5005)))
+HOST = os.getenv("LAN_CAPSULE_HOST", _config.get("host", "0.0.0.0"))
+SHARED_TOKEN = os.getenv("LAN_CAPSULE_SHARED_TOKEN", _config.get("shared_token", "")).strip()
+
+_REAPER_CAPTURE_LOCK = threading.Lock()
+
+app = Flask(__name__, static_folder=None)
+
+# 前端静态文件服务（绿色版内嵌前端 build 产物）
+_WEBAPP_DIR = APP_DIR / "webapp"
+if not _WEBAPP_DIR.exists():
+    _WEBAPP_DIR = APP_DIR.parent / "webapp" / "dist"
+
+if _WEBAPP_DIR.exists():
+    from flask import send_from_directory
+
+    @app.route("/")
+    def serve_index():
+        return send_from_directory(str(_WEBAPP_DIR), "index.html")
+
+    @app.route("/<path:path>")
+    def serve_static(path):
+        file_path = _WEBAPP_DIR / path
+        if file_path.exists() and file_path.is_file():
+            return send_from_directory(str(_WEBAPP_DIR), path)
+        return send_from_directory(str(_WEBAPP_DIR), "index.html")
+
 CORS(
     app,
-    resources={r"/api/*": {"origins": os.getenv("LAN_CAPSULE_CORS", "*").split(",")}},
+    resources={r"/api/*": {"origins": "*"}},
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Capsule-Token"],
 )
+
+
+# ---------------------- 胶囊文件系统管理 ----------------------
+
+def _read_manifest(capsule_dir: Path) -> dict | None:
+    mf = capsule_dir / "manifest.json"
+    if not mf.exists():
+        meta = capsule_dir / "metadata.json"
+        if meta.exists():
+            try:
+                raw = json.loads(meta.read_text("utf-8"))
+                return {"capsule": raw, "tags": [], "metadata": raw.get("info", {})}
+            except Exception:
+                return None
+        return None
+    try:
+        return json.loads(mf.read_text("utf-8"))
+    except Exception:
+        return None
+
+
+def _write_manifest(capsule_dir: Path, manifest: dict):
+    mf = capsule_dir / "manifest.json"
+    mf.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _dir_size(d: Path) -> int:
+    return sum(p.stat().st_size for p in d.rglob("*") if p.is_file())
+
+
+def _capsule_from_dir(capsule_dir: Path) -> dict | None:
+    """从胶囊目录读取 manifest 并组装为 API 返回格式。"""
+    manifest = _read_manifest(capsule_dir)
+    if not manifest:
+        return None
+    cap = manifest.get("capsule") or {}
+    uuid = cap.get("uuid") or capsule_dir.name
+    name = cap.get("name") or capsule_dir.name
+    return {
+        "id": uuid,
+        "uuid": uuid,
+        "name": name,
+        "project_name": cap.get("project_name"),
+        "capsule_type": cap.get("capsule_type", "reaper"),
+        "preview_audio": cap.get("preview_audio"),
+        "rpp_file": cap.get("rpp_file"),
+        "keywords": cap.get("keywords"),
+        "description": cap.get("description"),
+        "source_peer": cap.get("source_peer"),
+        "size_bytes": _dir_size(capsule_dir),
+        "created_at": cap.get("created_at") or _get_dir_ctime(capsule_dir),
+        "tags": manifest.get("tags", []),
+        "metadata": manifest.get("metadata", {}),
+    }
+
+
+def _get_dir_ctime(d: Path) -> str:
+    try:
+        ts = d.stat().st_birthtime if hasattr(d.stat(), "st_birthtime") else d.stat().st_ctime
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds")
+    except Exception:
+        return ""
+
+
+def scan_capsules(q: str | None = None) -> list[dict]:
+    """扫描 CAPSULES_DIR 下所有胶囊文件夹。"""
+    items = []
+    if not CAPSULES_DIR.exists():
+        return items
+    for sub in sorted(CAPSULES_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        if not sub.is_dir() or sub.name.startswith("."):
+            continue
+        cap = _capsule_from_dir(sub)
+        if cap:
+            if q:
+                q_lower = q.lower()
+                if q_lower not in (cap.get("name") or "").lower() and q_lower not in (cap.get("keywords") or "").lower():
+                    continue
+            items.append(cap)
+    return items
+
+
+def get_capsule_by_id(cap_id: str) -> dict | None:
+    """通过 uuid 获取胶囊。"""
+    d = CAPSULES_DIR / cap_id
+    if d.exists() and d.is_dir():
+        return _capsule_from_dir(d)
+    for sub in CAPSULES_DIR.iterdir():
+        if sub.is_dir():
+            c = _capsule_from_dir(sub)
+            if c and c["uuid"] == cap_id:
+                return c
+    return None
+
+
+# ---------------------- 联系人文件管理 ----------------------
+
+def _load_contacts() -> list[dict]:
+    if CONTACTS_FILE.exists():
+        try:
+            return json.loads(CONTACTS_FILE.read_text("utf-8"))
+        except Exception:
+            pass
+    return []
+
+
+def _save_contacts(contacts: list[dict]):
+    CONTACTS_FILE.write_text(json.dumps(contacts, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _contacts_next_id(contacts: list[dict]) -> int:
+    return max((c.get("id", 0) for c in contacts), default=0) + 1
 
 
 # ---------------------- 工具 ----------------------
@@ -83,7 +240,6 @@ def _ok(data=None, **kwargs):
 
 
 def _check_shared_token() -> tuple[bool, str | None]:
-    """若配置了共享密钥，校验请求头 X-Capsule-Token。"""
     if not SHARED_TOKEN:
         return True, None
     sent = request.headers.get("X-Capsule-Token", "")
@@ -92,12 +248,8 @@ def _check_shared_token() -> tuple[bool, str | None]:
     return True, None
 
 
-def _capsule_dir(uuid: str) -> Path:
-    return CAPSULES_DIR / uuid
-
-
-def _peer_label(ip: str, port: int) -> str:
-    return f"{ip}:{port}"
+def _now_iso() -> str:
+    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
 
 # ---------------------- 健康检查 / 网络信息 ----------------------
@@ -119,13 +271,13 @@ def get_network_info():
 @app.route("/api/capsules", methods=["GET"])
 def list_capsules():
     q = request.args.get("q")
-    capsules = db.list_capsules(q=q)
+    capsules = scan_capsules(q=q)
     return _ok({"items": capsules, "count": len(capsules)})
 
 
-@app.route("/api/capsules/<int:capsule_id>", methods=["GET"])
-def get_capsule(capsule_id: int):
-    cap = db.get_capsule_full(capsule_id)
+@app.route("/api/capsules/<cap_id>", methods=["GET"])
+def get_capsule(cap_id: str):
+    cap = get_capsule_by_id(cap_id)
     if not cap:
         return _err("胶囊不存在", 404)
     return _ok(cap)
@@ -133,42 +285,15 @@ def get_capsule(capsule_id: int):
 
 @app.route("/api/capsules", methods=["POST"])
 def create_capsule():
-    """注册一个本地胶囊。
-
-    支持两种用法：
-    A) 上传 zip：multipart/form-data，字段 ``bundle``（zip 文件）+ 可选 ``meta``（JSON）
-    B) 引用已有目录：JSON ``{ "name", "source_dir", "preview_audio?", "rpp_file?", ... }``
-       —— ``source_dir`` 下所有文件会被复制到 data/capsules/<uuid>/
-    """
+    """导入胶囊 bundle（zip）。"""
     if "bundle" in request.files:
         f = request.files["bundle"]
-        meta_extra = {}
-        if "meta" in request.form:
-            try:
-                meta_extra = json.loads(request.form["meta"])
-            except Exception:
-                return _err("meta 字段不是合法 JSON", 400)
         try:
             manifest, final_dir, size_bytes = extract_bundle(f.stream, CAPSULES_DIR)
         except ValueError as e:
             return _err(str(e), 400)
-        cap_meta = manifest.get("capsule") or {}
-        cap_meta.update({k: v for k, v in meta_extra.items() if v is not None})
-        cap = db.insert_capsule(
-            uuid=cap_meta.get("uuid"),
-            name=cap_meta.get("name") or final_dir.name,
-            project_name=cap_meta.get("project_name"),
-            capsule_type=cap_meta.get("capsule_type", "reaper"),
-            file_path=str(final_dir.relative_to(DATA_DIR)),
-            preview_audio=cap_meta.get("preview_audio"),
-            rpp_file=cap_meta.get("rpp_file"),
-            keywords=cap_meta.get("keywords"),
-            description=cap_meta.get("description"),
-            source_peer=None,
-            size_bytes=size_bytes,
-            tags=manifest.get("tags") or [],
-            metadata=manifest.get("metadata") or {},
-        )
+        _write_manifest(final_dir, manifest)
+        cap = _capsule_from_dir(final_dir)
         return _ok(cap, message="胶囊已导入"), 201
 
     payload = request.get_json(silent=True) or {}
@@ -181,51 +306,121 @@ def create_capsule():
         return _err(f"源目录不存在: {source_dir}", 400)
 
     cap_uuid = payload.get("uuid") or str(uuid_lib.uuid4())
-    target = _capsule_dir(cap_uuid)
+    target = CAPSULES_DIR / cap_uuid
     if target.exists():
         return _err("UUID 冲突，胶囊目录已存在", 409)
     shutil.copytree(src, target)
-    size_bytes = sum(p.stat().st_size for p in target.rglob("*") if p.is_file())
 
-    cap = db.insert_capsule(
-        uuid=cap_uuid,
-        name=name,
-        project_name=payload.get("project_name"),
-        capsule_type=payload.get("capsule_type", "reaper"),
-        file_path=str(target.relative_to(DATA_DIR)),
-        preview_audio=payload.get("preview_audio"),
-        rpp_file=payload.get("rpp_file"),
-        keywords=payload.get("keywords"),
-        description=payload.get("description"),
-        size_bytes=size_bytes,
-        tags=payload.get("tags") or [],
-        metadata=payload.get("metadata") or {},
-    )
-    return _ok(cap, message="胶囊已创建"), 201
+    manifest = {
+        "schema_version": 1,
+        "capsule": {
+            "uuid": cap_uuid,
+            "name": name,
+            "project_name": payload.get("project_name"),
+            "capsule_type": payload.get("capsule_type", "reaper"),
+            "preview_audio": payload.get("preview_audio"),
+            "rpp_file": payload.get("rpp_file"),
+            "keywords": payload.get("keywords"),
+            "description": payload.get("description"),
+            "created_at": _now_iso(),
+        },
+        "tags": payload.get("tags") or [],
+        "metadata": payload.get("metadata") or {},
+    }
+    _write_manifest(target, manifest)
+    return _ok(_capsule_from_dir(target), message="胶囊已创建"), 201
 
 
-@app.route("/api/capsules/<int:capsule_id>", methods=["DELETE"])
-def delete_capsule(capsule_id: int):
-    cap = db.get_capsule(capsule_id)
-    if not cap:
+@app.route("/api/capsules/<cap_id>", methods=["DELETE"])
+def delete_capsule(cap_id: str):
+    target = CAPSULES_DIR / cap_id
+    if not target.exists():
         return _err("胶囊不存在", 404)
-    if cap.get("file_path"):
-        target = (DATA_DIR / cap["file_path"]).resolve()
-        if target.exists() and CAPSULES_DIR.resolve() in target.parents:
-            shutil.rmtree(target, ignore_errors=True)
-    db.delete_capsule(capsule_id)
-    return _ok({"id": capsule_id})
+    shutil.rmtree(target, ignore_errors=True)
+    return _ok({"id": cap_id})
 
 
-@app.route("/api/capsules/<int:capsule_id>/bundle", methods=["GET"])
-def download_bundle(capsule_id: int):
-    cap = db.get_capsule_full(capsule_id)
-    if not cap:
+@app.route("/api/capsules/<cap_id>", methods=["PATCH"])
+def update_capsule(cap_id: str):
+    """重命名胶囊。"""
+    target = CAPSULES_DIR / cap_id
+    if not target.exists():
         return _err("胶囊不存在", 404)
-    capsule_root = (DATA_DIR / cap["file_path"]).resolve()
-    if not capsule_root.exists():
-        return _err("胶囊文件目录缺失", 410)
-    blob = build_bundle(cap, capsule_root, sender=network_info(PORT))
+    manifest = _read_manifest(target)
+    if not manifest:
+        return _err("manifest 读取失败", 500)
+    data = request.get_json(silent=True) or {}
+    new_name = data.get("name")
+    if new_name and new_name.strip():
+        if "capsule" not in manifest:
+            manifest["capsule"] = {}
+        manifest["capsule"]["name"] = new_name.strip()
+        _write_manifest(target, manifest)
+    return _ok(_capsule_from_dir(target))
+
+
+@app.route("/api/capsules/<cap_id>/preview", methods=["GET"])
+def capsule_preview(cap_id: str):
+    """提供胶囊预览音频。"""
+    target = CAPSULES_DIR / cap_id
+    if not target.exists():
+        return _err("胶囊不存在", 404)
+    manifest = _read_manifest(target)
+    if manifest:
+        cap = manifest.get("capsule") or {}
+        if cap.get("preview_audio"):
+            p = target / cap["preview_audio"]
+            if p.exists():
+                mime = "audio/ogg" if p.suffix.lower() == ".ogg" else "audio/wav"
+                return send_file(str(p), mimetype=mime)
+    for ext in ("*.ogg", "*.wav"):
+        files = list(target.glob(ext))
+        if files:
+            f = files[0]
+            mime = "audio/ogg" if f.suffix.lower() == ".ogg" else "audio/wav"
+            return send_file(str(f), mimetype=mime)
+    return _err("无预览音频文件", 404)
+
+
+@app.route("/api/capsules/<cap_id>/open-rpp", methods=["POST"])
+def open_capsule_rpp(cap_id: str):
+    """在系统中打开 RPP。"""
+    target = CAPSULES_DIR / cap_id
+    if not target.exists():
+        return _err("胶囊不存在", 404)
+    manifest = _read_manifest(target)
+    rpp_path = None
+    if manifest:
+        cap = manifest.get("capsule") or {}
+        if cap.get("rpp_file"):
+            rpp_path = target / cap["rpp_file"]
+    if not rpp_path or not rpp_path.exists():
+        rpps = list(target.glob("*.rpp"))
+        if rpps:
+            rpp_path = rpps[0]
+    if not rpp_path or not rpp_path.exists():
+        return _err("未找到 RPP 工程文件", 404)
+    try:
+        if platform.system() == "Darwin":
+            subprocess.Popen(["open", str(rpp_path)])
+        elif platform.system() == "Windows":
+            os.startfile(str(rpp_path))
+        else:
+            subprocess.Popen(["xdg-open", str(rpp_path)])
+    except Exception as e:
+        return _err(f"打开 RPP 失败: {e}", 500)
+    return _ok({"rpp": str(rpp_path), "message": "已打开"})
+
+
+@app.route("/api/capsules/<cap_id>/bundle", methods=["GET"])
+def download_bundle(cap_id: str):
+    target = CAPSULES_DIR / cap_id
+    if not target.exists():
+        return _err("胶囊不存在", 404)
+    cap = _capsule_from_dir(target)
+    if not cap:
+        return _err("manifest 读取失败", 500)
+    blob = build_bundle(cap, target, sender=network_info(PORT))
     return send_file(
         io.BytesIO(blob),
         mimetype="application/zip",
@@ -238,7 +433,6 @@ def download_bundle(capsule_id: int):
 
 @app.route("/api/capsules/webui-export", methods=["OPTIONS", "POST"])
 def webui_export():
-    """通过 Reaper WebUI 捕获胶囊（复用 synesth/data-pipeline 导出模块）。"""
     if request.method == "OPTIONS":
         resp = jsonify({"status": "ok"})
         resp.headers["Access-Control-Allow-Origin"] = "*"
@@ -249,10 +443,7 @@ def webui_export():
     try:
         from exporters.reaper_webui_export import quick_webui_export
     except ImportError as e:
-        return _err(
-            f"Reaper 导出模块不可用（请确认 synesth/data-pipeline 存在且依赖已安装）: {e}",
-            501,
-        )
+        return _err(f"Reaper 导出模块不可用: {e}", 501)
 
     data = request.get_json(silent=True) or {}
     capsule_type = data.get("capsule_type", "magic")
@@ -268,15 +459,21 @@ def webui_export():
 
     logger.info("Reaper webui-export: type=%s preview=%s dir=%s", capsule_type, render_preview, export_dir)
 
-    result = quick_webui_export(
-        project_name=project_name,
-        theme_name=theme_name,
-        render_preview=render_preview,
-        webui_port=webui_port,
-        capsule_type=capsule_type,
-        export_dir=export_dir,
-        username=username,
-    )
+    if not _REAPER_CAPTURE_LOCK.acquire(blocking=False):
+        return _err("已有 Reaper 捕获在进行中，请等待完成后再试", 429)
+
+    try:
+        result = quick_webui_export(
+            project_name=project_name,
+            theme_name=theme_name,
+            render_preview=render_preview,
+            webui_port=webui_port,
+            capsule_type=capsule_type,
+            export_dir=export_dir,
+            username=username,
+        )
+    finally:
+        _REAPER_CAPTURE_LOCK.release()
 
     if not result.get("success"):
         return _err(result.get("error", "Reaper 导出失败"), 500)
@@ -284,14 +481,13 @@ def webui_export():
     expected_name = result.get("capsule_name")
     capsule_dir_path = Path(export_dir) / expected_name if expected_name else None
 
-    import time as _time
     waited = 0.0
     while capsule_dir_path and waited < 5:
         metadata_file = capsule_dir_path / "metadata.json"
         if metadata_file.exists():
-            _time.sleep(0.3)
+            time.sleep(0.3)
             break
-        _time.sleep(0.3)
+        time.sleep(0.3)
         waited += 0.3
 
     imported = None
@@ -306,33 +502,31 @@ def webui_export():
             cap_uuid = meta.get("uuid") or meta.get("id") or str(uuid_lib.uuid4())
             name = meta.get("name") or expected_name or capsule_dir_path.name
 
-            target = CAPSULES_DIR / cap_uuid
-            if capsule_dir_path.resolve() != target.resolve():
-                if target.exists():
-                    shutil.rmtree(target)
-                shutil.move(str(capsule_dir_path), str(target))
-            size_bytes = sum(p.stat().st_size for p in target.rglob("*") if p.is_file())
-
-            existing = db.get_capsule_by_uuid(cap_uuid)
-            if existing:
-                db.delete_capsule(existing["id"])
+            final_target = CAPSULES_DIR / cap_uuid
+            if capsule_dir_path.resolve() != final_target.resolve():
+                if final_target.exists():
+                    shutil.rmtree(final_target)
+                shutil.move(str(capsule_dir_path), str(final_target))
 
             tech = meta.get("info", {}) or {}
             plugins = meta.get("plugins", {}) or {}
             routing = meta.get("routing_info", {}) or {}
 
-            imported = db.insert_capsule(
-                uuid=cap_uuid,
-                name=name,
-                project_name=meta.get("project_name"),
-                capsule_type=capsule_type,
-                file_path=str(target.relative_to(DATA_DIR)),
-                preview_audio=meta.get("preview_audio") or (meta.get("files") or {}).get("preview"),
-                rpp_file=meta.get("rpp_file") or (meta.get("files") or {}).get("project"),
-                keywords=meta.get("keywords"),
-                description=meta.get("description"),
-                size_bytes=size_bytes,
-                metadata={
+            manifest = {
+                "schema_version": 1,
+                "capsule": {
+                    "uuid": cap_uuid,
+                    "name": name,
+                    "project_name": meta.get("project_name"),
+                    "capsule_type": capsule_type,
+                    "preview_audio": meta.get("preview_audio") or (meta.get("files") or {}).get("preview"),
+                    "rpp_file": meta.get("rpp_file") or (meta.get("files") or {}).get("project"),
+                    "keywords": meta.get("keywords"),
+                    "description": meta.get("description"),
+                    "created_at": _now_iso(),
+                },
+                "tags": [],
+                "metadata": {
                     "bpm": tech.get("bpm"),
                     "duration": tech.get("length"),
                     "sample_rate": tech.get("sample_rate"),
@@ -342,15 +536,14 @@ def webui_export():
                     "has_folder_bus": routing.get("has_folder_bus"),
                     "tracks_included": routing.get("tracks_included"),
                 },
-            )
+            }
+            _write_manifest(final_target, manifest)
+            imported = _capsule_from_dir(final_target)
 
-    resp_data = {
-        "capsule_name": expected_name,
-        "export_result": result,
-    }
+    resp_data = {"capsule_name": expected_name, "export_result": result}
     if imported:
         resp_data["auto_imported"] = [imported]
-        logger.info("Reaper 导出并入库: %s (id=%s)", imported.get("name"), imported.get("id"))
+        logger.info("Reaper 导出并入库: %s", imported.get("name"))
     else:
         resp_data["auto_imported"] = []
         logger.warning("Reaper 导出成功但未能自动入库: %s", expected_name)
@@ -362,7 +555,7 @@ def webui_export():
 
 @app.route("/api/contacts", methods=["GET"])
 def list_contacts():
-    return _ok({"items": db.list_contacts()})
+    return _ok({"items": _load_contacts()})
 
 
 @app.route("/api/contacts", methods=["POST"])
@@ -374,13 +567,34 @@ def create_contact():
     note = data.get("note")
     if not name or not ip:
         return _err("name 和 ip 必填", 400)
-    return _ok(db.upsert_contact(name=name, ip=ip, port=port, note=note)), 201
+    contacts = _load_contacts()
+    existing = next((c for c in contacts if c["ip"] == ip and c["port"] == port), None)
+    if existing:
+        existing["name"] = name
+        if note is not None:
+            existing["note"] = note
+    else:
+        contacts.append({
+            "id": _contacts_next_id(contacts),
+            "name": name,
+            "ip": ip,
+            "port": port,
+            "note": note or "",
+            "last_seen": None,
+            "created_at": _now_iso(),
+        })
+    _save_contacts(contacts)
+    target = next((c for c in contacts if c["ip"] == ip and c["port"] == port), None)
+    return _ok(target), 201
 
 
 @app.route("/api/contacts/<int:contact_id>", methods=["DELETE"])
 def delete_contact(contact_id: int):
-    if not db.delete_contact(contact_id):
+    contacts = _load_contacts()
+    new_list = [c for c in contacts if c.get("id") != contact_id]
+    if len(new_list) == len(contacts):
         return _err("联系人不存在", 404)
+    _save_contacts(new_list)
     return _ok({"id": contact_id})
 
 
@@ -397,7 +611,11 @@ def ping_contact():
         ok = r.ok
         latency_ms = int((time.time() - started) * 1000)
         if ok:
-            db.touch_contact(ip, port)
+            contacts = _load_contacts()
+            for c in contacts:
+                if c["ip"] == ip and c["port"] == port:
+                    c["last_seen"] = _now_iso()
+            _save_contacts(contacts)
         return _ok({"online": ok, "latency_ms": latency_ms, "status": r.status_code})
     except Exception as e:
         return _ok({"online": False, "error": str(e)})
@@ -420,49 +638,18 @@ def p2p_import():
     sender_name = request.headers.get("X-Capsule-Peer-Name") or sender_ip
     peer_label = sender_name if sender_name == sender_ip else f"{sender_name} ({sender_ip})"
 
-    transfer_id = db.insert_transfer(
-        direction="receive",
-        peer_ip=sender_ip,
-        peer_name=sender_name,
-        capsule_name=None,
-        status="pending",
-    )
     try:
         manifest, final_dir, size_bytes = extract_bundle(f.stream, CAPSULES_DIR)
     except ValueError as e:
-        db.update_transfer(transfer_id, status="failed", error=str(e))
         return _err(str(e), 400)
 
-    cap_meta = manifest.get("capsule") or {}
-    # 若同 uuid 已存在记录，则替换
-    existing = db.get_capsule_by_uuid(cap_meta.get("uuid", ""))
-    if existing:
-        db.delete_capsule(existing["id"])
+    if "capsule" not in manifest:
+        manifest["capsule"] = {}
+    manifest["capsule"]["source_peer"] = peer_label
+    _write_manifest(final_dir, manifest)
 
-    cap = db.insert_capsule(
-        uuid=cap_meta.get("uuid"),
-        name=cap_meta.get("name") or final_dir.name,
-        project_name=cap_meta.get("project_name"),
-        capsule_type=cap_meta.get("capsule_type", "reaper"),
-        file_path=str(final_dir.relative_to(DATA_DIR)),
-        preview_audio=cap_meta.get("preview_audio"),
-        rpp_file=cap_meta.get("rpp_file"),
-        keywords=cap_meta.get("keywords"),
-        description=cap_meta.get("description"),
-        source_peer=peer_label,
-        size_bytes=size_bytes,
-        tags=manifest.get("tags") or [],
-        metadata=manifest.get("metadata") or {},
-    )
-    db.update_transfer(
-        transfer_id,
-        status="success",
-        capsule_id=cap["id"],
-        capsule_name=cap["name"],
-        bytes_total=size_bytes,
-        finished_at=_now_iso(),
-    )
-    logger.info("接收胶囊 %s 来自 %s (%d bytes)", cap["name"], peer_label, size_bytes)
+    cap = _capsule_from_dir(final_dir)
+    logger.info("接收胶囊 %s 来自 %s (%d bytes)", cap.get("name"), peer_label, size_bytes)
     return _ok(cap, message="已接收并入库"), 201
 
 
@@ -473,30 +660,20 @@ def p2p_send():
     capsule_id = data.get("capsule_id")
     target_ip = (data.get("target_ip") or "").strip()
     target_port = int(data.get("target_port") or 5005)
-    target_name = data.get("target_name") or _peer_label(target_ip, target_port)
+    target_name = data.get("target_name") or f"{target_ip}:{target_port}"
     if not capsule_id or not target_ip:
         return _err("capsule_id 与 target_ip 必填", 400)
 
-    cap = db.get_capsule_full(int(capsule_id))
+    cap_id = str(capsule_id)
+    cap = get_capsule_by_id(cap_id)
     if not cap:
         return _err("胶囊不存在", 404)
-    capsule_root = (DATA_DIR / cap["file_path"]).resolve()
+    capsule_root = CAPSULES_DIR / cap["uuid"]
     if not capsule_root.exists():
         return _err("胶囊文件目录缺失", 410)
 
     self_info = network_info(PORT)
     blob = build_bundle(cap, capsule_root, sender=self_info)
-
-    transfer_id = db.insert_transfer(
-        direction="send",
-        peer_ip=target_ip,
-        peer_port=target_port,
-        peer_name=target_name,
-        capsule_id=cap["id"],
-        capsule_name=cap["name"],
-        status="pending",
-        bytes_total=len(blob),
-    )
 
     headers = {
         "X-Capsule-Peer-IP": self_info.get("ip", ""),
@@ -515,47 +692,55 @@ def p2p_send():
             timeout=120,
         )
     except Exception as e:
-        db.update_transfer(transfer_id, status="failed", error=str(e), finished_at=_now_iso())
         return _err(f"发送失败: {e}", 502)
 
     if not resp.ok:
-        db.update_transfer(
-            transfer_id,
-            status="failed",
-            error=f"HTTP {resp.status_code}: {resp.text[:200]}",
-            finished_at=_now_iso(),
-        )
         return _err(f"对方拒绝: HTTP {resp.status_code}", 502)
 
-    db.update_transfer(transfer_id, status="success", finished_at=_now_iso())
-    db.upsert_contact(name=target_name, ip=target_ip, port=target_port)
-    return _ok(
-        {
-            "transfer_id": transfer_id,
-            "bytes": len(blob),
-            "remote": resp.json(),
-        },
-        message="已发送",
-    )
+    # 发送成功后自动保存联系人
+    contacts = _load_contacts()
+    existing = next((c for c in contacts if c["ip"] == target_ip and c["port"] == target_port), None)
+    if not existing:
+        contacts.append({
+            "id": _contacts_next_id(contacts),
+            "name": target_name,
+            "ip": target_ip,
+            "port": target_port,
+            "note": "",
+            "last_seen": _now_iso(),
+            "created_at": _now_iso(),
+        })
+        _save_contacts(contacts)
+
+    return _ok({"bytes": len(blob), "remote": resp.json()}, message="已发送")
 
 
-@app.route("/api/transfers", methods=["GET"])
-def list_transfers():
-    return _ok({"items": db.list_transfers()})
+# ---------------------- 设置 ----------------------
+
+@app.route("/api/settings", methods=["GET"])
+def get_settings():
+    return _ok(load_config())
 
 
-# ---------------------- helpers ----------------------
-
-def _now_iso() -> str:
-    from datetime import datetime
-
-    return datetime.utcnow().isoformat(timespec="seconds")
+@app.route("/api/settings", methods=["PATCH"])
+def update_settings():
+    data = request.get_json(silent=True) or {}
+    cfg = load_config()
+    if "reaper_path" in data:
+        cfg["reaper_path"] = data["reaper_path"]
+    if "port" in data:
+        cfg["port"] = int(data["port"])
+    if "shared_token" in data:
+        cfg["shared_token"] = data["shared_token"]
+    save_config(cfg)
+    return _ok(cfg)
 
 
 # ---------------------- 入口 ----------------------
 
 if __name__ == "__main__":
     logger.info("Sound Capsule LAN 服务启动: %s:%d", HOST, PORT)
+    logger.info("程序目录: %s", APP_DIR)
     logger.info("数据目录: %s", DATA_DIR)
     if SHARED_TOKEN:
         logger.info("已启用共享密钥（X-Capsule-Token）")

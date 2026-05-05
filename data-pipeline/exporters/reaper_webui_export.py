@@ -179,7 +179,9 @@ class ReaperWebUIExporter:
                     reaper_path = config.get('reaper_path')
                     if reaper_path:
                         reaper_exe = Path(reaper_path)
-                        if reaper_exe.exists():
+                        if reaper_exe.is_dir() and reaper_exe.suffix == '.app':
+                            reaper_exe = reaper_exe / "Contents" / "MacOS" / "REAPER"
+                        if reaper_exe.exists() and reaper_exe.is_file():
                             print(f"✓ 使用用户配置的 REAPER 路径: {reaper_exe}")
                             return reaper_exe
                         else:
@@ -364,11 +366,17 @@ class ReaperWebUIExporter:
                 
                 print(f"✓ 执行命令: {' '.join(cmd)}")
                 
+                # CREATE_NO_WINDOW 防止 console 窗口闪现; SW_HIDE 进一步隐藏
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0  # SW_HIDE
                 result = subprocess.run(
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=10
+                    timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    startupinfo=startupinfo
                 )
                 
                 print(f"✓ REAPER 命令已发送")

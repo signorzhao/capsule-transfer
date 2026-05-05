@@ -28,6 +28,10 @@ export const api = {
     jsonFetch(`/capsules${q ? `?q=${encodeURIComponent(q)}` : ''}`),
   getCapsule: (id) => jsonFetch(`/capsules/${id}`),
   deleteCapsule: (id) => jsonFetch(`/capsules/${id}`, { method: 'DELETE' }),
+  renameCapsule: (id, name) =>
+    jsonFetch(`/capsules/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  previewUrl: (id) => `${API_BASE}/capsules/${id}/preview`,
+  openRpp: (id) => jsonFetch(`/capsules/${id}/open-rpp`, { method: 'POST' }),
 
   listContacts: () => jsonFetch('/contacts'),
   addContact: (payload) =>
@@ -39,7 +43,9 @@ export const api = {
   send: (payload) =>
     jsonFetch('/p2p/send', { method: 'POST', body: JSON.stringify(payload) }),
 
-  listTransfers: () => jsonFetch('/transfers'),
+  getSettings: () => jsonFetch('/settings'),
+  updateSettings: (payload) =>
+    jsonFetch('/settings', { method: 'PATCH', body: JSON.stringify(payload) }),
 };
 
 export async function uploadCapsuleBundle(file, meta = {}) {

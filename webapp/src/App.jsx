@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Send,
   Plus,
@@ -13,6 +13,12 @@ import {
   Upload,
   RefreshCw,
   Copy,
+  Play,
+  Pause,
+  FolderOpen,
+  Pencil,
+  Check,
+  X,
 } from 'lucide-react';
 
 import NavIcon from './components/NavIcon.jsx';
@@ -51,14 +57,14 @@ function Shell() {
 
   const [capsules, setCapsules] = useState([]);
   const [contacts, setContacts] = useState([]);
-  const [selectedCapsule, setSelectedCapsule] = useState(null);
-  const [targetContact, setTargetContact] = useState(null);
+  const [selectedCapsules, setSelectedCapsules] = useState([]);
+  const [targetContacts, setTargetContacts] = useState([]);
   const [tempPeer, setTempPeer] = useState({ ip: '', port: '5005' });
   const [showTempPeerForm, setShowTempPeerForm] = useState(false);
   const [showAddContact, setShowAddContact] = useState(false);
 
   const [isSending, setIsSending] = useState(false);
-  const [captureStatus, setCaptureStatus] = useState(null); // null | { phase, message }
+  const [captureStatus, setCaptureStatus] = useState(null);
 
   const refreshAll = useCallback(async () => {
     try {
@@ -89,49 +95,59 @@ function Shell() {
   }, [refreshAll]);
 
   const handleSelectCapsuleForSend = (cap) => {
-    setSelectedCapsule(cap);
+    setSelectedCapsules((prev) =>
+      prev.find((c) => c.id === cap.id) ? prev : [...prev, cap]
+    );
     setActiveTab('transfer');
   };
 
   const handleStartTransferTo = (contact) => {
-    setTargetContact(contact);
+    setTargetContacts((prev) =>
+      prev.find((c) => c.id === contact.id) ? prev : [...prev, contact]
+    );
     setActiveTab('transfer');
   };
 
   const handleSend = async () => {
-    if (!selectedCapsule) {
+    if (selectedCapsules.length === 0) {
       toast.error('请先选择要发送的胶囊');
       return;
     }
-    const peer = targetContact
-      ? targetContact
-      : tempPeer.ip
-      ? { name: tempPeer.ip, ip: tempPeer.ip, port: Number(tempPeer.port) || 5005 }
-      : null;
-    if (!peer) {
+    const peers = [...targetContacts];
+    if (tempPeer.ip) {
+      peers.push({ name: tempPeer.ip, ip: tempPeer.ip, port: Number(tempPeer.port) || 5005 });
+    }
+    if (peers.length === 0) {
       toast.error('请选择联系人或填写临时 IP');
       return;
     }
     setIsSending(true);
-    try {
-      const resp = await api.send({
-        capsule_id: selectedCapsule.id,
-        target_ip: peer.ip,
-        target_port: peer.port,
-        target_name: peer.name,
-      });
-      toast.success(
-        `已发送 “${selectedCapsule.name}” → ${peer.name}（${formatBytes(
-          resp.data?.bytes || 0
-        )}）`
-      );
-      setSelectedCapsule(null);
-      refreshAll();
-    } catch (e) {
-      toast.error(`发送失败：${e.message}`);
-    } finally {
-      setIsSending(false);
+    let successCount = 0;
+    let failCount = 0;
+    for (const cap of selectedCapsules) {
+      for (const peer of peers) {
+        try {
+          await api.send({
+            capsule_id: cap.uuid || cap.id,
+            target_ip: peer.ip,
+            target_port: peer.port,
+            target_name: peer.name,
+          });
+          successCount++;
+        } catch (e) {
+          failCount++;
+          toast.error(`发送 "${cap.name}" → ${peer.name} 失败：${e.message}`);
+        }
+      }
     }
+    if (successCount > 0) {
+      toast.success(`已完成 ${successCount} 项发送`);
+    }
+    setSelectedCapsules([]);
+    setTargetContacts([]);
+    setTempPeer({ ip: '', port: '5005' });
+    refreshAll();
+    setIsSending(false);
   };
 
   const handleUploadBundle = async (file) => {
@@ -174,7 +190,7 @@ function Shell() {
   };
 
   const handleDeleteCapsule = async (cap) => {
-    if (!window.confirm(`确认删除胶囊 “${cap.name}”？文件也会从本地删除。`)) return;
+    if (!window.confirm(`确认删除胶囊 "${cap.name}"？文件也会从本地删除。`)) return;
     try {
       await api.deleteCapsule(cap.id);
       toast.success('已删除');
@@ -196,7 +212,7 @@ function Shell() {
   };
 
   const handleDeleteContact = async (contact) => {
-    if (!window.confirm(`移除联系人 “${contact.name}”？`)) return;
+    if (!window.confirm(`移除联系人 "${contact.name}"？`)) return;
     try {
       await api.deleteContact(contact.id);
       toast.success('已删除');
@@ -217,6 +233,25 @@ function Shell() {
       refreshAll();
     } catch (e) {
       toast.error(`Ping 失败：${e.message}`);
+    }
+  };
+
+  const handleRenameCapsule = async (cap, newName) => {
+    try {
+      await api.renameCapsule(cap.id, newName);
+      toast.success(`已重命名为 "${newName}"`);
+      refreshAll();
+    } catch (e) {
+      toast.error(`重命名失败：${e.message}`);
+    }
+  };
+
+  const handleOpenRpp = async (cap) => {
+    try {
+      await api.openRpp(cap.id);
+      toast.success('已打开 RPP 工程');
+    } catch (e) {
+      toast.error(`打开失败：${e.message}`);
     }
   };
 
@@ -324,6 +359,8 @@ function Shell() {
               onDelete={handleDeleteCapsule}
               onUpload={handleUploadBundle}
               onCreate={handleCreateCapsule}
+              onRename={handleRenameCapsule}
+              onOpenRpp={handleOpenRpp}
             />
           )}
 
@@ -344,10 +381,10 @@ function Shell() {
             <TransferView
               capsules={capsules}
               contacts={contacts}
-              selectedCapsule={selectedCapsule}
-              setSelectedCapsule={setSelectedCapsule}
-              targetContact={targetContact}
-              setTargetContact={setTargetContact}
+              selectedCapsules={selectedCapsules}
+              setSelectedCapsules={setSelectedCapsules}
+              targetContacts={targetContacts}
+              setTargetContacts={setTargetContacts}
               tempPeer={tempPeer}
               setTempPeer={setTempPeer}
               showTempPeerForm={showTempPeerForm}
@@ -368,9 +405,53 @@ function Shell() {
   );
 }
 
-function LibraryView({ capsules, onSend, onDelete, onUpload, onCreate }) {
+function LibraryView({ capsules, onSend, onDelete, onUpload, onCreate, onRename, onOpenRpp }) {
   const inputRef = React.useRef(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
+  const [playingId, setPlayingId] = useState(null);
+  const audioRef = useRef(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editName, setEditName] = useState('');
+
+  const handlePlay = (cap) => {
+    if (playingId === cap.id) {
+      audioRef.current?.pause();
+      setPlayingId(null);
+      return;
+    }
+    if (audioRef.current) {
+      audioRef.current.pause();
+    }
+    const audio = new Audio(api.previewUrl(cap.id));
+    audio.onended = () => setPlayingId(null);
+    audio.onerror = () => setPlayingId(null);
+    audio.play();
+    audioRef.current = audio;
+    setPlayingId(cap.id);
+  };
+
+  const startRename = (cap) => {
+    setEditingId(cap.id);
+    setEditName(cap.name);
+  };
+
+  const confirmRename = (cap) => {
+    if (editName.trim() && editName.trim() !== cap.name) {
+      onRename(cap, editName.trim());
+    }
+    setEditingId(null);
+  };
+
+  const cancelRename = () => {
+    setEditingId(null);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) audioRef.current.pause();
+    };
+  }, []);
+
   return (
     <div className="max-w-4xl mx-auto">
       <div className="flex items-center justify-between mb-8">
@@ -422,7 +503,7 @@ function LibraryView({ capsules, onSend, onDelete, onUpload, onCreate }) {
       {capsules.length === 0 && !showCreateForm ? (
         <div className="border-2 border-dashed border-slate-800 rounded-2xl flex flex-col items-center justify-center p-16 text-slate-500">
           <Package size={32} className="mb-3" />
-          <p className="text-sm">暂无胶囊。可点右上角“新捕获”从本地目录创建，或“导入胶囊”加载 .capsule.zip。</p>
+          <p className="text-sm">暂无胶囊。可点右上角"新捕获"从本地目录创建，或"导入胶囊"加载 .capsule.zip。</p>
         </div>
       ) : (
         <div className="grid gap-3">
@@ -431,11 +512,54 @@ function LibraryView({ capsules, onSend, onDelete, onUpload, onCreate }) {
               key={cap.id}
               className="group bg-[#1a1d24] hover:bg-[#21252e] border border-slate-800 p-4 rounded-xl flex items-center transition-all"
             >
-              <div className="w-10 h-10 bg-slate-800 rounded flex items-center justify-center text-indigo-400 mr-4">
-                <FileAudio size={20} />
-              </div>
+              <button
+                onClick={() => handlePlay(cap)}
+                className={`w-10 h-10 rounded flex items-center justify-center mr-4 transition-all ${
+                  playingId === cap.id
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-slate-800 text-indigo-400 hover:bg-indigo-600/20'
+                }`}
+                title={playingId === cap.id ? '暂停预览' : '播放预览'}
+              >
+                {playingId === cap.id ? <Pause size={18} /> : <Play size={18} />}
+              </button>
               <div className="flex-1 min-w-0">
-                <h3 className="font-medium text-slate-200 truncate">{cap.name}</h3>
+                {editingId === cap.id ? (
+                  <div className="flex items-center space-x-2">
+                    <input
+                      autoFocus
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') confirmRename(cap);
+                        if (e.key === 'Escape') cancelRename();
+                      }}
+                      className="flex-1 bg-[#0f1115] border border-indigo-500 rounded px-2 py-1 text-sm text-slate-200 focus:outline-none"
+                    />
+                    <button
+                      onClick={() => confirmRename(cap)}
+                      className="p-1 text-emerald-400 hover:text-emerald-300"
+                      title="确认"
+                    >
+                      <Check size={16} />
+                    </button>
+                    <button
+                      onClick={cancelRename}
+                      className="p-1 text-slate-500 hover:text-slate-300"
+                      title="取消"
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                ) : (
+                  <h3
+                    className="font-medium text-slate-200 truncate cursor-pointer hover:text-indigo-300 transition-colors"
+                    onDoubleClick={() => startRename(cap)}
+                    title="双击重命名"
+                  >
+                    {cap.name}
+                  </h3>
+                )}
                 <div className="text-xs text-slate-500 mt-1 flex space-x-3">
                   <span>{formatDate(cap.created_at)}</span>
                   <span>{formatBytes(cap.size_bytes)}</span>
@@ -444,6 +568,20 @@ function LibraryView({ capsules, onSend, onDelete, onUpload, onCreate }) {
                   )}
                 </div>
               </div>
+              <button
+                onClick={() => startRename(cap)}
+                className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-indigo-400 transition-all"
+                title="重命名"
+              >
+                <Pencil size={15} />
+              </button>
+              <button
+                onClick={() => onOpenRpp(cap)}
+                className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-amber-400 transition-all"
+                title="在 Reaper 中打开工程"
+              >
+                <FolderOpen size={16} />
+              </button>
               <button
                 onClick={() => onSend(cap)}
                 className="opacity-0 group-hover:opacity-100 mr-1 p-2 bg-indigo-600/10 text-indigo-400 rounded-lg hover:bg-indigo-600 hover:text-white transition-all"
@@ -644,10 +782,10 @@ function FormField({ label, children }) {
 function TransferView({
   capsules,
   contacts,
-  selectedCapsule,
-  setSelectedCapsule,
-  targetContact,
-  setTargetContact,
+  selectedCapsules,
+  setSelectedCapsules,
+  targetContacts,
+  setTargetContacts,
   tempPeer,
   setTempPeer,
   showTempPeerForm,
@@ -655,91 +793,116 @@ function TransferView({
   isSending,
   onSend,
 }) {
+  const removeCapsule = (id) => setSelectedCapsules((prev) => prev.filter((c) => c.id !== id));
+  const removeTarget = (id) => setTargetContacts((prev) => prev.filter((c) => c.id !== id));
+  const toggleCapsule = (cap) => {
+    setSelectedCapsules((prev) =>
+      prev.find((c) => c.id === cap.id) ? prev.filter((c) => c.id !== cap.id) : [...prev, cap]
+    );
+  };
+  const toggleTarget = (contact) => {
+    setTargetContacts((prev) =>
+      prev.find((c) => c.id === contact.id) ? prev.filter((c) => c.id !== contact.id) : [...prev, contact]
+    );
+  };
+
+  const totalTasks = selectedCapsules.length * (targetContacts.length + (tempPeer.ip ? 1 : 0));
+
   return (
-    <div className="max-w-xl mx-auto mt-6">
+    <div className="max-w-2xl mx-auto mt-6">
       <div className="bg-[#1a1d24] p-8 rounded-3xl border border-slate-800 shadow-2xl relative overflow-hidden">
         <h2 className="text-xl font-bold text-white mb-6 flex items-center">
           <Send size={20} className="mr-2 text-indigo-500" />
           发送胶囊
         </h2>
 
-        {/* 目标选择 */}
+        {/* 目标联系人（多选） */}
         <div className="mb-8">
           <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">
-            目标联系人
+            目标联系人（可多选）
           </label>
-          {targetContact ? (
-            <div className="flex items-center justify-between bg-[#0f1115] p-4 rounded-2xl border border-indigo-500/30">
-              <div className="flex items-center space-x-3">
-                <div className="w-10 h-10 bg-indigo-600/20 rounded-full flex items-center justify-center text-indigo-500 font-bold">
-                  {(targetContact.name || '?')[0]}
-                </div>
-                <div>
-                  <div className="text-sm font-bold text-white">{targetContact.name}</div>
-                  <div className="text-xs text-slate-500 font-mono">
-                    {targetContact.ip}:{targetContact.port}
+
+          {targetContacts.length > 0 && (
+            <div className="flex flex-wrap gap-2 mb-3">
+              {targetContacts.map((tc) => (
+                <div
+                  key={tc.id}
+                  className="flex items-center space-x-2 bg-indigo-600/10 border border-indigo-500/30 px-3 py-1.5 rounded-full"
+                >
+                  <div className="w-6 h-6 bg-indigo-600/30 rounded-full flex items-center justify-center text-[10px] font-bold text-indigo-300">
+                    {(tc.name || '?')[0]}
                   </div>
+                  <span className="text-xs text-indigo-200">{tc.name}</span>
+                  <button
+                    onClick={() => removeTarget(tc.id)}
+                    className="text-indigo-400 hover:text-white ml-1"
+                  >
+                    <X size={12} />
+                  </button>
                 </div>
-              </div>
-              <button
-                onClick={() => setTargetContact(null)}
-                className="text-xs text-slate-500 hover:text-white"
-              >
-                修改
-              </button>
+              ))}
             </div>
-          ) : showTempPeerForm ? (
+          )}
+
+          {showTempPeerForm ? (
             <div className="bg-[#0f1115] p-4 rounded-2xl border border-slate-800 space-y-3">
               <div className="grid grid-cols-3 gap-3">
                 <input
-                  className="col-span-2 bg-[#161920] border border-slate-800 rounded-lg px-3 py-2 text-sm"
+                  className="col-span-2 bg-[#161920] border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200"
                   placeholder="对方 IP（如 192.168.x.x）"
                   value={tempPeer.ip}
                   onChange={(e) => setTempPeer({ ...tempPeer, ip: e.target.value })}
                 />
                 <input
-                  className="bg-[#161920] border border-slate-800 rounded-lg px-3 py-2 text-sm"
+                  className="bg-[#161920] border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200"
                   placeholder="端口"
                   value={tempPeer.port}
                   onChange={(e) => setTempPeer({ ...tempPeer, port: e.target.value })}
                 />
               </div>
               <div className="text-xs text-slate-500">
-                临时 IP 不会保存到联系人簿；发送成功后会自动入簿。
+                临时 IP 会与选定的联系人一起作为发送目标。
               </div>
               <div className="flex justify-end">
                 <button
-                  onClick={() => setShowTempPeerForm(false)}
+                  onClick={() => { setShowTempPeerForm(false); setTempPeer({ ip: '', port: '5005' }); }}
                   className="text-xs text-slate-400 hover:text-white"
                 >
-                  改回选择联系人
+                  取消临时 IP
                 </button>
               </div>
             </div>
           ) : (
             <div className="grid grid-cols-2 gap-3">
-              {contacts.length === 0 && (
+              {contacts.length === 0 && targetContacts.length === 0 && (
                 <div className="col-span-2 text-xs text-slate-500 bg-[#0f1115] border border-slate-800 rounded-xl p-3">
-                  暂无联系人，可使用“临时 IP”立即发送。
+                  暂无联系人，可使用"临时 IP"立即发送。
                 </div>
               )}
-              {contacts.map((c) => (
-                <button
-                  key={c.id}
-                  onClick={() => setTargetContact(c)}
-                  className="flex items-center space-x-3 bg-[#0f1115] p-3 rounded-xl border border-slate-800 hover:border-indigo-500 transition-all text-left"
-                >
-                  <div className="w-8 h-8 bg-slate-800 rounded-full flex items-center justify-center text-xs text-slate-400">
-                    {(c.name || '?')[0]}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-xs font-medium truncate">{c.name}</div>
-                    <div className="text-[10px] text-slate-500 font-mono truncate">
-                      {c.ip}:{c.port}
+              {contacts.map((c) => {
+                const selected = targetContacts.find((tc) => tc.id === c.id);
+                return (
+                  <button
+                    key={c.id}
+                    onClick={() => toggleTarget(c)}
+                    className={`flex items-center space-x-3 bg-[#0f1115] p-3 rounded-xl border transition-all text-left ${
+                      selected ? 'border-indigo-500 bg-indigo-600/5' : 'border-slate-800 hover:border-indigo-500'
+                    }`}
+                  >
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs ${
+                      selected ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'
+                    }`}>
+                      {selected ? <Check size={14} /> : (c.name || '?')[0]}
                     </div>
-                  </div>
-                </button>
-              ))}
+                    <div className="min-w-0">
+                      <div className="text-xs font-medium truncate">{c.name}</div>
+                      <div className="text-[10px] text-slate-500 font-mono truncate">
+                        {c.ip}:{c.port}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
               <button
                 onClick={() => setShowTempPeerForm(true)}
                 className="flex items-center justify-center space-x-2 bg-[#0f1115] p-3 rounded-xl border border-slate-800 hover:border-slate-700 text-slate-500"
@@ -751,43 +914,55 @@ function TransferView({
           )}
         </div>
 
-        {/* 内容选择 */}
+        {/* 内容选择（多选） */}
         <div className="mb-10">
           <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">
-            选择内容
+            选择内容（可多选）
           </label>
-          {selectedCapsule ? (
-            <div className="bg-[#0f1115] p-4 rounded-2xl border border-slate-800 flex items-center justify-between">
-              <div className="flex items-center space-x-3">
-                <FileAudio className="text-indigo-400" size={20} />
-                <div>
-                  <div className="text-sm">{selectedCapsule.name}</div>
-                  <div className="text-[10px] text-slate-500">
-                    {formatBytes(selectedCapsule.size_bytes)} · {formatDate(selectedCapsule.created_at)}
-                  </div>
+
+          {selectedCapsules.length > 0 && (
+            <div className="flex flex-wrap gap-2 mb-3">
+              {selectedCapsules.map((cap) => (
+                <div
+                  key={cap.id}
+                  className="flex items-center space-x-2 bg-slate-800/60 border border-slate-700 px-3 py-1.5 rounded-full"
+                >
+                  <FileAudio size={12} className="text-indigo-400" />
+                  <span className="text-xs text-slate-200 max-w-[120px] truncate">{cap.name}</span>
+                  <span className="text-[10px] text-slate-500">{formatBytes(cap.size_bytes)}</span>
+                  <button
+                    onClick={() => removeCapsule(cap.id)}
+                    className="text-slate-400 hover:text-white ml-1"
+                  >
+                    <X size={12} />
+                  </button>
                 </div>
-              </div>
-              <button
-                onClick={() => setSelectedCapsule(null)}
-                className="text-xs text-slate-500 hover:text-white"
-              >
-                更换
-              </button>
+              ))}
             </div>
-          ) : (
-            <div className="space-y-2 max-h-56 overflow-y-auto custom-scrollbar pr-1">
-              {capsules.length === 0 && (
-                <div className="text-xs text-slate-500 bg-[#0f1115] border border-slate-800 rounded-xl p-3">
-                  胶囊库为空，先在“库”页导入或捕获胶囊。
-                </div>
-              )}
-              {capsules.map((cap) => (
+          )}
+
+          <div className="space-y-2 max-h-56 overflow-y-auto custom-scrollbar pr-1">
+            {capsules.length === 0 && (
+              <div className="text-xs text-slate-500 bg-[#0f1115] border border-slate-800 rounded-xl p-3">
+                胶囊库为空，先在"库"页导入或捕获胶囊。
+              </div>
+            )}
+            {capsules.map((cap) => {
+              const selected = selectedCapsules.find((sc) => sc.id === cap.id);
+              return (
                 <button
                   key={cap.id}
-                  onClick={() => setSelectedCapsule(cap)}
-                  className="w-full text-left bg-[#0f1115] p-3 rounded-xl border border-slate-800 hover:border-indigo-500 flex items-center justify-between"
+                  onClick={() => toggleCapsule(cap)}
+                  className={`w-full text-left bg-[#0f1115] p-3 rounded-xl border flex items-center justify-between transition-all ${
+                    selected ? 'border-indigo-500 bg-indigo-600/5' : 'border-slate-800 hover:border-indigo-500'
+                  }`}
                 >
                   <div className="flex items-center space-x-3 min-w-0">
+                    <div className={`w-5 h-5 rounded flex items-center justify-center ${
+                      selected ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-500'
+                    }`}>
+                      {selected ? <Check size={12} /> : null}
+                    </div>
                     <FileAudio className="text-indigo-400 shrink-0" size={16} />
                     <span className="text-xs truncate">{cap.name}</span>
                   </div>
@@ -795,16 +970,23 @@ function TransferView({
                     {formatBytes(cap.size_bytes)}
                   </span>
                 </button>
-              ))}
-            </div>
-          )}
+              );
+            })}
+          </div>
         </div>
 
+        {/* 发送摘要 */}
+        {totalTasks > 0 && (
+          <div className="mb-4 text-xs text-slate-400 text-center">
+            将发送 {selectedCapsules.length} 个胶囊 → {targetContacts.length + (tempPeer.ip ? 1 : 0)} 个目标（共 {totalTasks} 项任务）
+          </div>
+        )}
+
         <button
-          disabled={!selectedCapsule || isSending}
+          disabled={selectedCapsules.length === 0 || totalTasks === 0 || isSending}
           onClick={onSend}
           className={`w-full py-4 rounded-2xl font-bold flex items-center justify-center space-x-2 transition-all ${
-            isSending || !selectedCapsule
+            isSending || selectedCapsules.length === 0 || totalTasks === 0
               ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
               : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/30 active:scale-[0.98]'
           }`}
@@ -830,9 +1012,57 @@ function TransferView({
 }
 
 function SettingsView({ networkInfo, apiBase }) {
+  const [settings, setSettings] = useState(null);
+  const [reaperPath, setReaperPath] = useState('');
+  const [saving, setSaving] = useState(false);
+  const toast = useToast();
+
+  useEffect(() => {
+    api.getSettings().then((r) => {
+      setSettings(r.data);
+      setReaperPath(r.data?.reaper_path || '');
+    }).catch(() => {});
+  }, []);
+
+  const handleSaveReaperPath = async () => {
+    setSaving(true);
+    try {
+      const r = await api.updateSettings({ reaper_path: reaperPath });
+      setSettings(r.data);
+      toast.success('Reaper 路径已保存');
+    } catch (e) {
+      toast.error(`保存失败：${e.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="max-w-2xl mx-auto">
       <h1 className="text-2xl font-bold text-white mb-6">设置 / 信息</h1>
+
+      <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 mb-6">
+        <h3 className="text-sm font-bold text-slate-200 mb-4">Reaper 路径</h3>
+        <div className="flex items-center space-x-3">
+          <input
+            value={reaperPath}
+            onChange={(e) => setReaperPath(e.target.value)}
+            placeholder="例如：/Applications/REAPER.app 或留空自动检测"
+            className="flex-1 bg-[#0f1115] border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-indigo-500"
+          />
+          <button
+            onClick={handleSaveReaperPath}
+            disabled={saving}
+            className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg disabled:opacity-40"
+          >
+            {saving ? '保存中…' : '保存'}
+          </button>
+        </div>
+        <p className="text-xs text-slate-500 mt-2">
+          macOS 填 .app 路径即可（如 /Applications/REAPER.app），程序会自动解析到可执行文件。
+        </p>
+      </div>
+
       <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 space-y-3 text-sm">
         <Row k="API 地址" v={apiBase} />
         <Row k="主机名" v={networkInfo?.hostname} />

@@ -37,6 +37,7 @@ local function LoadConfig()
     local capsule_type = content:match('"capsule_type"%s*:%s*"([^"]*)"')
     local username = content:match('"username"%s*:%s*"([^"]*)"')
     local export_dir = content:match('"export_dir"%s*:%s*"([^"]*)"')
+    local main_export_lua = content:match('"main_export_lua"%s*:%s*"([^"]*)"')
 
     if not project_name or not theme_name then
         return nil, "配置文件格式错误"
@@ -53,7 +54,8 @@ local function LoadConfig()
         theme_name = theme_name,
         render_preview = render_preview,
         capsule_type = capsule_type or "magic",
-        username = username or "user"
+        username = username or "user",
+        main_export_lua = (main_export_lua and main_export_lua ~= "" and main_export_lua ~= "null") and main_export_lua or nil
     }
 
     -- 如果配置中指定了导出目录，保存到全局变量
@@ -176,18 +178,18 @@ local function Main()
     -- 找到脚本路径 (相对于当前脚本)
     local script_path = debug.getinfo(1).source:match("@(.*)$")
     local script_dir = script_path:match("(.*[/\\])")
-    local main_script = script_dir .. "main_export2.lua"
+    local main_script = (config.main_export_lua and config.main_export_lua ~= "")
+        and config.main_export_lua
+        or (script_dir .. "main_export2.lua")
     Log("  主脚本路径: " .. main_script .. "\n")
 
-    -- 尝试加载
     local main_export_func, load_err = loadfile(main_script)
     if not main_export_func then
-        Log("  相对路径加载失败，尝试绝对路径...\n")
-        -- 尝试绝对路径
-        local alt_path = "/Users/ianzhao/Desktop/Sound_Capsule/synesth/data-pipeline/lua_scripts/main_export2.lua"
-        Log("  绝对路径: " .. alt_path .. "\n")
-        main_export_func = loadfile(alt_path)
-
+        if config.main_export_lua then
+            local fallback = script_dir .. "main_export2.lua"
+            Log("  配置路径加载失败，尝试同目录: " .. fallback .. "\n")
+            main_export_func, load_err = loadfile(fallback)
+        end
         if not main_export_func then
             local error_msg = "无法加载主导出脚本: " .. (load_err or "未知错误")
             Log("✗ " .. error_msg .. "\n")

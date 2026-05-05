@@ -5,7 +5,7 @@
 -- 包含：精简的 RPP 工程、预览音频、JSON 元数据
 
 -- 全局变量：控制控制台输出
-local ENABLE_CONSOLE = false  -- 设为 false 关闭所有控制台输出
+local ENABLE_CONSOLE = false
 
 -- 保存原始的 ShowConsoleMsg 函数
 local _original_ShowConsoleMsg = reaper.ShowConsoleMsg
@@ -154,6 +154,23 @@ function GetRelatedTracks(item)
     -- 2. 递归查找父级轨道（并获取父级列表）
     reaper.ShowConsoleMsg("  2. 查找父级轨道\n")
     local parentTracks = FindParentTracks(itemTrack, keepTracks)
+
+    -- 2.5. 如果是 folder track，查找所有子轨道
+    local folderDepth = reaper.GetMediaTrackInfo_Value(itemTrack, "I_FOLDERDEPTH")
+    if folderDepth == 1 then
+        reaper.ShowConsoleMsg("  2.5. 检测到 Folder Track，收集子轨道\n")
+        local trackIdx = reaper.GetMediaTrackInfo_Value(itemTrack, "IP_TRACKNUMBER") - 1
+        local depth = 1
+        for ci = trackIdx + 1, reaper.CountTracks(0) - 1 do
+            local childTrack = reaper.GetTrack(0, ci)
+            if not childTrack then break end
+            AddTrackToKeep(keepTracks, childTrack)
+            local _, childName = reaper.GetSetMediaTrackInfo_String(childTrack, "P_NAME", "", false)
+            reaper.ShowConsoleMsg("    子轨道: " .. (childName or "未命名") .. "\n")
+            depth = depth + reaper.GetMediaTrackInfo_Value(childTrack, "I_FOLDERDEPTH")
+            if depth <= 0 then break end
+        end
+    end
 
     -- 3. 查找Send目标轨道（递归）
     reaper.ShowConsoleMsg("  3. 查找Send目标轨道（递归）\n")
@@ -535,7 +552,92 @@ function CollectSelectedItemsMedia()
         local item = reaper.GetSelectedMediaItem(0, i)
         if item then
             local take = reaper.GetActiveTake(item)
-            if take then
+            if not take then
+                -- 空 Item（folder item / empty item）：无音频源，但仍需保留在胶囊中
+                reaper.ShowConsoleMsg("  检测到空 Item（无 Take），保留在胶囊中\n")
+                local track = reaper.GetMediaItemTrack(item)
+                table.insert(itemsInfo, {
+                    position = reaper.GetMediaItemInfo_Value(item, "D_POSITION"),
+                    length = reaper.GetMediaItemInfo_Value(item, "D_LENGTH"),
+                    volume = reaper.GetMediaItemInfo_Value(item, "D_VOL"),
+                    trackNum = track and reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER") or 0,
+                    mediaFile = nil
+                })
+                -- 如果是 folder track 上的空 item，收集子轨道上的媒体文件
+                if track then
+                    local folderDepth = reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH")
+                    if folderDepth == 1 then
+                        local folderStart = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+                        local folderEnd = folderStart + reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+                        reaper.ShowConsoleMsg(string.format("  Folder Item: 收集子轨道媒体 (%.2f - %.2f)\n", folderStart, folderEnd))
+                        local trackIdx = reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER") - 1
+                        local depth = 1
+                        for ci = trackIdx + 1, reaper.CountTracks(0) - 1 do
+                            local childTrack = reaper.GetTrack(0, ci)
+                            if not childTrack then break end
+                            local childItemCount = reaper.CountTrackMediaItems(childTrack)
+                            for j = 0, childItemCount - 1 do
+                                local childItem = reaper.GetTrackMediaItem(childTrack, j)
+                                if childItem then
+                                    local cStart = reaper.GetMediaItemInfo_Value(childItem, "D_POSITION")
+                                    local cEnd = cStart + reaper.GetMediaItemInfo_Value(childItem, "D_LENGTH")
+                                    if cStart < folderEnd and cEnd > folderStart then
+                                        local childTake = reaper.GetActiveTake(childItem)
+                                        if childTake then
+                                            local childSource = reaper.GetMediaItemTake_Source(childTake)
+                                            if childSource then
+                                                local childSourceType = reaper.GetMediaSourceType(childSource, "")
+                                                if childSourceType == "SECTION" or childSourceType == "REVERSE" then
+                                                    childSource = reaper.GetMediaSourceParent(childSource)
+                                                end
+                                                if childSource and childSourceType ~= "MIDI" then
+                                                    local retval, fileName = reaper.GetMediaSourceFileName(childSource, "")
+                                                    if not fileName or fileName == "" or fileName == "?" then
+                                                        if type(retval) == "string" and retval ~= "" and retval ~= "?" then fileName = retval end
+                                                    end
+                                                    if fileName and fileName ~= "" and fileName ~= "?" then
+                                                        local isAbsolute = string.match(fileName, "^/") or string.match(fileName, "^[A-Za-z]:")
+                                                        local fullPath = nil
+                                                        if isAbsolute then
+                                                            fullPath = fileName
+                                                        else
+                                                            local testPaths = {
+                                                                JoinPath(currentProjDir, sourceMediaFolder, fileName),
+                                                                JoinPath(currentProjDir, fileName),
+                                                                JoinPath(currentProjDir, "audio", fileName),
+                                                                JoinPath(currentProjDir, "Audio", fileName),
+                                                            }
+                                                            for _, testPath in ipairs(testPaths) do
+                                                                if testPath and testPath ~= "" then
+                                                                    local f = io.open(testPath, "r")
+                                                                    if f then f:close(); fullPath = testPath; break end
+                                                                end
+                                                            end
+                                                        end
+                                                        if fullPath then
+                                                            local f = io.open(fullPath, "r")
+                                                            if f then
+                                                                f:close()
+                                                                local baseName = string.match(fullPath, "([^/\\]+)$") or fullPath
+                                                                if not mediaFiles[fullPath] then
+                                                                    mediaFiles[fullPath] = baseName
+                                                                    reaper.ShowConsoleMsg("    ✓ 子轨道媒体: " .. baseName .. "\n")
+                                                                end
+                                                            end
+                                                        end
+                                                    end
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                            depth = depth + reaper.GetMediaTrackInfo_Value(childTrack, "I_FOLDERDEPTH")
+                            if depth <= 0 then break end
+                        end
+                    end
+                end
+            elseif take then
                 local source = reaper.GetMediaItemTake_Source(take)
                 if source then
                     local sourceType = reaper.GetMediaSourceType(source, "")
@@ -692,16 +794,60 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
     -- RPP 中 <TRACK> 块顺序与 REAPER 轨道顺序一致，currentTrackNum 1 = 第 1 个 TRACK 块，对应 API 轨道号 1
     reaper.ShowConsoleMsg("收集需要保留的轨道...\n")
     local keepTrackNumbers = {}
+    local selectedItemGUIDs = {}
     local numItems = reaper.CountSelectedMediaItems(0)
     for i = 0, numItems - 1 do
         local item = reaper.GetSelectedMediaItem(0, i)
         if item then
+            -- 收集 item 的 GUID（用于 RPP 中按 IGUID 精确匹配）
+            local _, itemGUID = reaper.GetSetMediaItemInfo_String(item, "GUID", "", false)
+            if itemGUID and itemGUID ~= "" then
+                selectedItemGUIDs[itemGUID:lower()] = true
+                reaper.ShowConsoleMsg("  选中 Item GUID: " .. itemGUID .. "\n")
+            end
             local relatedTracks = GetRelatedTracks(item)
             for track, _ in pairs(relatedTracks) do
                 local trackNum = reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER")
                 keepTrackNumbers[trackNum] = true
                 local _, trackName = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
                 reaper.ShowConsoleMsg("  保留轨道 " .. trackNum .. ": " .. (trackName or "未命名") .. "\n")
+            end
+
+            -- Folder item：收集子轨道上时间范围内所有 item 的 GUID
+            local itemTrack = reaper.GetMediaItemTrack(item)
+            if itemTrack then
+                local folderDepth = reaper.GetMediaTrackInfo_Value(itemTrack, "I_FOLDERDEPTH")
+                local take = reaper.GetActiveTake(item)
+                if folderDepth == 1 and not take then
+                    local folderStart = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+                    local folderEnd = folderStart + reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+                    reaper.ShowConsoleMsg(string.format("  Folder Item 时间范围: %.2f - %.2f，收集子 Item...\n", folderStart, folderEnd))
+                    local trackIdx = reaper.GetMediaTrackInfo_Value(itemTrack, "IP_TRACKNUMBER") - 1
+                    local depth = 1
+                    for ci = trackIdx + 1, reaper.CountTracks(0) - 1 do
+                        local childTrack = reaper.GetTrack(0, ci)
+                        if not childTrack then break end
+                        -- 收集此子轨道上时间范围内的 item
+                        local childItemCount = reaper.CountTrackMediaItems(childTrack)
+                        for j = 0, childItemCount - 1 do
+                            local childItem = reaper.GetTrackMediaItem(childTrack, j)
+                            if childItem then
+                                local cStart = reaper.GetMediaItemInfo_Value(childItem, "D_POSITION")
+                                local cEnd = cStart + reaper.GetMediaItemInfo_Value(childItem, "D_LENGTH")
+                                -- item 与 folder 时间范围有重叠就保留
+                                if cStart < folderEnd and cEnd > folderStart then
+                                    local _, cGUID = reaper.GetSetMediaItemInfo_String(childItem, "GUID", "", false)
+                                    if cGUID and cGUID ~= "" then
+                                        selectedItemGUIDs[cGUID:lower()] = true
+                                        reaper.ShowConsoleMsg("    子 Item GUID: " .. cGUID .. "\n")
+                                    end
+                                end
+                            end
+                        end
+                        depth = depth + reaper.GetMediaTrackInfo_Value(childTrack, "I_FOLDERDEPTH")
+                        if depth <= 0 then break end
+                    end
+                end
             end
         end
     end
@@ -752,25 +898,41 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
     -- 重映射轨道路由号：RPP 使用 AUXRECV（receive）、SEND/AUXRENDER（send），均为 0-based（State Chunk 文档）
     if keptCount > 0 and next(oldIndexToNewIndex) then
         reaper.ShowConsoleMsg("重映射轨道路由号 (AUXRECV/SEND/AUXRENDER 0-based)...\n")
-        local oldIndices = {}
-        for oldIdx, _ in pairs(oldIndexToNewIndex) do
-            table.insert(oldIndices, oldIdx)
+        -- 使用函数替换，精确匹配完整数字避免部分匹配
+        local function remapTrackIndex(prefix, numStr)
+            local num = tonumber(numStr)
+            if num ~= nil and oldIndexToNewIndex[num] ~= nil then
+                return prefix .. oldIndexToNewIndex[num]
+            end
+            return prefix .. numStr
         end
-        table.sort(oldIndices, function(a, b) return a > b end)
-        local trail = "([^%d]?)"
-        for _, oldIdx in ipairs(oldIndices) do
-            local newIdx = oldIndexToNewIndex[oldIdx]
-            if newIdx ~= nil and oldIdx ~= newIdx then
-                content = content:gsub("AUXRECV%s+" .. oldIdx .. trail, "AUXRECV " .. newIdx .. "%1")
-                content = content:gsub("SEND%s+" .. oldIdx .. trail, "SEND " .. newIdx .. "%1")
-                content = content:gsub("AUXRENDER%s+" .. oldIdx .. trail, "AUXRENDER " .. newIdx .. "%1")
+        content = content:gsub("(AUXRECV%s+)(%d+)", remapTrackIndex)
+        content = content:gsub("(AUXSEND%s+)(%d+)", remapTrackIndex)
+        content = content:gsub("(AUXRENDER%s+)(%d+)", remapTrackIndex)
+        -- 删除引用不存在轨道的路由行（索引 >= 保留轨道数说明目标已被移除）
+        local finalContent = ""
+        for line in content:gmatch("([^\n]*)\n?") do
+            local keepLine = true
+            local auxrecvIdx = line:match("^%s*AUXRECV%s+(%d+)")
+            if auxrecvIdx then
+                local idx = tonumber(auxrecvIdx)
+                if idx >= keptCount then
+                    keepLine = false
+                    reaper.ShowConsoleMsg("  删除无效路由: AUXRECV " .. idx .. " (仅保留 " .. keptCount .. " 轨)\n")
+                end
+            end
+            if keepLine then
+                finalContent = finalContent .. line .. "\n"
             end
         end
+        content = finalContent
         reaper.ShowConsoleMsg("  轨道路由号重映射完成\n")
     end
 
     -- 删除未选中的 ITEM 块
+    -- 策略：保留通过 GUID 匹配的 item + 时间范围与选区重叠的 item（覆盖 folder 子 item）
     reaper.ShowConsoleMsg("清理未选中的 Items...\n")
+    reaper.ShowConsoleMsg(string.format("  时间选区: %.4f - %.4f\n", startTime, endTime))
     local selectedMediaNames = {}
     for origPath, _ in pairs(pathMapping) do
         local baseName = string.match(origPath, "([^/\\]+)$")
@@ -788,16 +950,35 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
             itemContent = line .. "\n"
         elseif inItem then
             itemContent = itemContent .. line .. "\n"
-            if line:match("^%s*</ITEM>") then itemDepth = 0 end  -- 兼容 </ITEM> 结束格式（MIDI 等）
+            if line:match("^%s*</ITEM>") then itemDepth = 0 end
             if line:match("^%s*<") then itemDepth = itemDepth + 1 end
             if line:match("^%s*>") then itemDepth = itemDepth - 1 end
             if itemDepth == 0 then
                 local keepItem = false
-                if itemContent:lower():find("source midi", 1, true) then
+                -- 方法 1：IGUID 精确匹配
+                local iguid = itemContent:match("IGUID%s+({[^}]+})")
+                if iguid and selectedItemGUIDs[iguid:lower()] then
                     keepItem = true
-                else
-                    for mediaName, _ in pairs(selectedMediaNames) do
-                        if itemContent:lower():find(mediaName, 1, true) then keepItem = true; break end
+                end
+                -- 方法 2：时间范围重叠（覆盖 folder 子 item 和所有保留轨道上的 item）
+                if not keepItem and startTime and endTime then
+                    local itemPos = tonumber(itemContent:match("POSITION%s+([%d%.%-]+)"))
+                    local itemLen = tonumber(itemContent:match("LENGTH%s+([%d%.%-]+)"))
+                    if itemPos and itemLen then
+                        local itemEnd = itemPos + itemLen
+                        if itemPos < endTime and itemEnd > startTime then
+                            keepItem = true
+                        end
+                    end
+                end
+                -- 方法 3：MIDI 或媒体文件名匹配（兜底）
+                if not keepItem then
+                    if itemContent:lower():find("source midi", 1, true) then
+                        keepItem = true
+                    else
+                        for mediaName, _ in pairs(selectedMediaNames) do
+                            if itemContent:lower():find(mediaName, 1, true) then keepItem = true; break end
+                        end
                     end
                 end
                 if keepItem then newContent = newContent .. itemContent
@@ -817,7 +998,8 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
     local replacedCount = 0
     for origPath, newPath in pairs(pathMapping) do
         local baseName = string.match(origPath, "([^/\\]+)$")
-        local pathVariants = { "Audio/" .. baseName, baseName }
+        -- 搜索所有可能出现在 RPP 中的路径格式
+        local pathVariants = { origPath, "Audio/" .. baseName, baseName }
         for _, variant in ipairs(pathVariants) do
             local escaped = variant:gsub("([%(%)%.%+%-%*%?%[%^%$%%])", "%%%1")
             local pattern = '(FILE%s+")' .. escaped .. '(")'
@@ -826,6 +1008,21 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
         end
     end
     reaper.ShowConsoleMsg("共替换 " .. replacedCount .. " 处路径\n")
+
+    -- 将剩余的相对媒体路径转为绝对路径（避免渲染时弹出"丢失媒体"对话框）
+    local currentProjDir2 = GetDirectoryPath(currentProjPath)
+    if currentProjDir2 and currentProjDir2 ~= "" then
+        content = content:gsub('(FILE%s+")([^"]-)"', function(prefix, filePath)
+            -- 跳过已经是绝对路径或已经是 Audio/ 开头的
+            if filePath:match("^/") or filePath:match("^[A-Za-z]:") or filePath:match("^Audio/") then
+                return prefix .. filePath .. '"'
+            end
+            -- 将相对路径转为绝对路径
+            local absPath = currentProjDir2 .. "/" .. filePath
+            return prefix .. absPath .. '"'
+        end)
+        reaper.ShowConsoleMsg("已将剩余相对路径转为绝对路径\n")
+    end
 
     -- 渲染参数（OGG，时间选区）
     if renderPreview then

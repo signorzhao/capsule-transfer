@@ -177,6 +177,14 @@ class Database:
                 )
         return self.get_capsule(cid)  # type: ignore[return-value]
 
+    def update_capsule_name(self, capsule_id: int, name: str) -> bool:
+        with self.conn() as c:
+            cur = c.execute(
+                "UPDATE capsules SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (name, capsule_id),
+            )
+            return cur.rowcount > 0
+
     def delete_capsule(self, capsule_id: int) -> bool:
         with self.conn() as c:
             cur = c.execute("DELETE FROM capsules WHERE id = ?", (capsule_id,))
