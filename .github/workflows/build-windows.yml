@@ -50,8 +50,7 @@ jobs:
           Copy-Item dist/flask-backend.exe src-tauri/binaries/flask-backend-x86_64-pc-windows-msvc.exe
 
       - name: Build Tauri app
-        working-directory: webapp
-        run: npx tauri build
+        run: npx --prefix webapp tauri build
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

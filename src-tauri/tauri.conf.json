@@ -4,8 +4,8 @@
   "version": "0.7.0",
   "identifier": "com.soundcapsule.lan",
   "build": {
-    "beforeBuildCommand": "npm run build",
-    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "",
+    "beforeDevCommand": "npm run dev --prefix ../webapp",
     "frontendDist": "../webapp/dist",
     "devUrl": "http://localhost:3100"
   },
