@@ -47,7 +47,7 @@ jobs:
           pip install pyinstaller
           pyinstaller flask-backend.spec --noconfirm
           New-Item -ItemType Directory -Force src-tauri/binaries
-          Copy-Item dist/flask-backend.exe src-tauri/binaries/flask-backend-x86_64-pc-windows-msvc.exe
+          Copy-Item dist/flask-backend.exe src-tauri/binaries/flask-backend.exe
 
       - name: Build Tauri app
         run: npx --prefix webapp tauri build

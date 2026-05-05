@@ -44,7 +44,10 @@
         "installMode": "currentUser"
       }
     },
-    "resources": ["../data-pipeline/**/*"]
+    "resources": [
+      "../data-pipeline/**/*",
+      "binaries/*"
+    ]
   },
   "plugins": {}
 

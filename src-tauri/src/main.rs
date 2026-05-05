@@ -5,20 +5,54 @@ use tauri::{
     Manager, WindowEvent,
 };
 use tauri_plugin_notification::NotificationExt;
-use tauri_plugin_shell::ShellExt;
+use std::process::{Child, Command};
 use std::sync::Mutex;
-use std::fs;
-use std::io::Write;
+use std::path::PathBuf;
 
-struct BackendChild(Mutex<Option<tauri_plugin_shell::process::CommandChild>>);
+struct BackendProcess(Mutex<Option<Child>>);
 
-fn log_to_file(msg: &str) {
-    if let Ok(mut f) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("capsule-debug.log")
+fn find_backend_exe(app: &tauri::App) -> Option<PathBuf> {
+    // 生产模式：在 resource 目录下查找
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let candidates = [
+            resource_dir.join("binaries").join("flask-backend.exe"),
+            resource_dir.join("binaries").join("flask-backend"),
+            resource_dir.join("flask-backend.exe"),
+            resource_dir.join("flask-backend"),
+        ];
+        for p in &candidates {
+            if p.exists() {
+                return Some(p.clone());
+            }
+        }
+    }
+
+    // 开发模式下不查找，用户手动启动 Flask
+    None
+}
+
+fn start_backend(app: &tauri::App) -> Option<Child> {
+    let exe_path = find_backend_exe(app)?;
+
+    let work_dir = exe_path.parent()?;
+
+    #[cfg(target_os = "windows")]
     {
-        let _ = writeln!(f, "{}", msg);
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        Command::new(&exe_path)
+            .current_dir(work_dir)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .ok()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new(&exe_path)
+            .current_dir(work_dir)
+            .spawn()
+            .ok()
     }
 }
 
@@ -44,38 +78,22 @@ fn flash_taskbar(app: tauri::AppHandle) {
 }
 
 fn main() {
-    log_to_file("=== Sound Capsule starting ===");
-
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![notify_new_capsule, flash_taskbar])
         .setup(|app| {
-            log_to_file("Setup starting...");
-
-            // 尝试启动 Flask sidecar（失败不崩溃）
-            let shell = app.shell();
-            match shell.sidecar("flask-backend") {
-                Ok(sidecar) => {
-                    match sidecar.spawn() {
-                        Ok((_rx, child)) => {
-                            log_to_file("Flask sidecar started successfully");
-                            app.manage(BackendChild(Mutex::new(Some(child))));
-                        }
-                        Err(e) => {
-                            log_to_file(&format!("Failed to spawn sidecar: {}", e));
-                            app.manage(BackendChild(Mutex::new(None)));
-                        }
-                    }
-                }
-                Err(e) => {
-                    log_to_file(&format!("Failed to create sidecar command: {}", e));
-                    app.manage(BackendChild(Mutex::new(None)));
-                }
+            // 尝试启动 Flask 后端（生产模式有 exe，开发模式用户手动启动）
+            let child = start_backend(app);
+            if child.is_some() {
+                eprintln!("[Sound Capsule] Flask backend started from bundled binary");
+            } else {
+                eprintln!("[Sound Capsule] No bundled backend found, expecting manual Flask start");
             }
+            app.manage(BackendProcess(Mutex::new(child)));
 
             // 系统托盘
-            let tray_result = TrayIconBuilder::new()
+            let _ = TrayIconBuilder::new()
                 .tooltip("Sound Capsule")
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
@@ -94,12 +112,6 @@ fn main() {
                 })
                 .build(app);
 
-            match tray_result {
-                Ok(_) => log_to_file("Tray icon created"),
-                Err(e) => log_to_file(&format!("Tray icon failed: {}", e)),
-            }
-
-            log_to_file("Setup complete");
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -112,12 +124,13 @@ fn main() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
-                log_to_file("Application exiting, killing backend...");
-                let state = app_handle.state::<BackendChild>();
+                let state = app_handle.state::<BackendProcess>();
                 let mut guard = state.0.lock().unwrap();
-                if let Some(child) = guard.take() {
+                if let Some(ref mut child) = *guard {
                     let _ = child.kill();
+                    let _ = child.wait();
                 }
+                *guard = None;
                 drop(guard);
             }
         });
