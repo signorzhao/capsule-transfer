@@ -1,7 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec 文件 —— 打包 Sound Capsule LAN 为绿色版桌面应用。
+"""PyInstaller spec 文件 —— 打包 Sound Capsule LAN 为绿色版可执行文件。
 
-Windows 版使用 Edge App Mode，不需要 pythonnet。
+使用方法：
+    cd capsule-transfer
+    # 先构建前端
+    cd webapp && npm run build && cd ..
+    # 打包
+    pyinstaller capsule-transfer.spec
+
+产出目录 dist/CapsuleTransfer/ 即为绿色版，可直接复制分发。
 """
 
 import os
@@ -11,7 +18,7 @@ block_cipher = None
 ROOT = Path(os.getcwd())
 
 a = Analysis(
-    [str(ROOT / 'main.py')],
+    [str(ROOT / 'server' / 'app.py')],
     pathex=[str(ROOT / 'server'), str(ROOT / 'data-pipeline')],
     binaries=[],
     datas=[
@@ -20,9 +27,8 @@ a = Analysis(
         # data-pipeline 模块
         (str(ROOT / 'data-pipeline'), 'data-pipeline'),
         # 服务端辅助模块
-        (str(ROOT / 'server' / 'app.py'), 'server'),
-        (str(ROOT / 'server' / 'bundle.py'), 'server'),
-        (str(ROOT / 'server' / 'net.py'), 'server'),
+        (str(ROOT / 'server' / 'bundle.py'), '.'),
+        (str(ROOT / 'server' / 'net.py'), '.'),
     ],
     hiddenimports=[
         'flask',
@@ -32,7 +38,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['pythonnet', 'clr', 'clr_loader', 'webview'],
+    excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
