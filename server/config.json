@@ -1,3 +1,4 @@
 {
-  "reaper_path": ""
+  "reaper_path": "",
+  "receive_mode": "confirm"
 }
