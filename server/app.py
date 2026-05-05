@@ -27,32 +27,17 @@ from flask_cors import CORS
 from bundle import build_bundle, extract_bundle
 from net import network_info
 
-# ---------------------- 路径初始化 ----------------------
+# ---------------------- 路径初始化（绿色版） ----------------------
 
 if getattr(sys, "frozen", False):
-    _EXE_DIR = Path(sys.executable).resolve().parent
+    APP_DIR = Path(sys.executable).resolve().parent
 else:
-    _EXE_DIR = Path(__file__).resolve().parent
+    APP_DIR = Path(__file__).resolve().parent
 
-# 用户数据目录：优先使用用户主目录下的固定位置（跨安装路径持久化）
-def _get_user_data_dir() -> Path:
-    """获取用户数据目录（胶囊、配置、联系人）"""
-    if platform.system() == "Darwin":
-        base = Path.home() / "Library" / "Application Support" / "CapsuleTransfer"
-    elif platform.system() == "Windows":
-        appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
-        base = Path(appdata) / "CapsuleTransfer"
-    else:
-        base = Path.home() / ".config" / "CapsuleTransfer"
-    return base
-
-DATA_DIR = _get_user_data_dir()
+DATA_DIR = APP_DIR / "data"
 CAPSULES_DIR = DATA_DIR / "capsules"
 CONTACTS_FILE = DATA_DIR / "contacts.json"
-CONFIG_FILE = DATA_DIR / "config.json"
-
-# 程序目录（用于找 data-pipeline 等资源）
-APP_DIR = _EXE_DIR
+CONFIG_FILE = APP_DIR / "config.json"
 
 CAPSULES_DIR.mkdir(parents=True, exist_ok=True)
 
