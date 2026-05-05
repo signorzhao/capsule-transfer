@@ -65,13 +65,10 @@ fn main() {
 
             Ok(())
         })
-        .on_window_event(|app, _window, event| {
+        .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                // 点 X 隐藏到托盘，不退出
                 api.prevent_close();
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.hide();
-                }
+                let _ = window.hide();
             }
         })
         .build(tauri::generate_context!())
