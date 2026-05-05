@@ -23,7 +23,6 @@ fn find_backend_exe(app: &tauri::App) -> Option<PathBuf> {
         }
     }
 
-    // 绿色版：exe 同目录下查找
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
             let p = exe_dir.join("flask-backend.exe");
@@ -61,6 +60,32 @@ fn start_backend(app: &tauri::App) -> Option<Child> {
             .current_dir(work_dir)
             .spawn()
             .ok()
+    }
+}
+
+fn kill_backend(state: &BackendProcess) {
+    let mut guard = state.0.lock().unwrap();
+    if let Some(ref mut child) = *guard {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    *guard = None;
+    drop(guard);
+
+    // 额外保障：杀掉所有 flask-backend 进程
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/IM", "flask-backend.exe"])
+            .creation_flags(0x08000000)
+            .output();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = Command::new("pkill")
+            .args(["-f", "flask-backend"])
+            .output();
     }
 }
 
@@ -103,15 +128,12 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
-                let state = app_handle.state::<BackendProcess>();
-                let mut guard = state.0.lock().unwrap();
-                if let Some(ref mut child) = *guard {
-                    let _ = child.kill();
-                    let _ = child.wait();
+            match event {
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
+                    let state = app_handle.state::<BackendProcess>();
+                    kill_backend(&state);
                 }
-                *guard = None;
-                drop(guard);
+                _ => {}
             }
         });
 }
