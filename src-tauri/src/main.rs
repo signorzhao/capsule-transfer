@@ -75,13 +75,12 @@ fn main() {
         .expect("error while running tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
-                // 退出时杀掉 Flask 后端
                 let state = app_handle.state::<BackendChild>();
-                if let Ok(mut guard) = state.0.lock() {
-                    if let Some(child) = guard.take() {
-                        let _ = child.kill();
-                    }
+                let mut guard = state.0.lock().unwrap();
+                if let Some(child) = guard.take() {
+                    let _ = child.kill();
                 }
+                drop(guard);
             }
         });
 }
