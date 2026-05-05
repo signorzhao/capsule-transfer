@@ -85,27 +85,38 @@ function Shell() {
     let es;
     try {
       es = new EventSource(api.notificationsUrl);
-      es.onmessage = (event) => {
+      es.onmessage = async (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.type === 'transfer_request') {
             setPendingRequests((prev) => [...prev, data.request]);
             setShowIncoming(true);
-            // 浏览器通知
-            if (Notification.permission === 'granted') {
-              new Notification('收到胶囊传输请求', {
-                body: `${data.request.sender_name} 想发送 "${data.request.capsule_name}" 给你`,
-              });
+            // 原生通知 + 任务栏闪烁（Tauri）或浏览器通知
+            try {
+              const { notifyNewCapsule, flashTaskbar } = await import('./tauri-bridge.js');
+              await notifyNewCapsule(data.request.sender_name);
+              await flashTaskbar();
+            } catch {
+              if (Notification.permission === 'granted') {
+                new Notification('收到胶囊传输请求', {
+                  body: `${data.request.sender_name} 想发送 "${data.request.capsule_name}" 给你`,
+                });
+              }
             }
             toast.info(`${data.request.sender_name} 请求发送 "${data.request.capsule_name}"`);
           } else if (data.type === 'capsule_received') {
+            try {
+              const { notifyNewCapsule, flashTaskbar } = await import('./tauri-bridge.js');
+              await notifyNewCapsule(data.capsule?.sender || '未知');
+              await flashTaskbar();
+            } catch {}
             toast.success(`收到新胶囊：${data.capsule?.name}`);
             refreshAll();
           }
         } catch {}
       };
     } catch {}
-    // 请求浏览器通知权限
+    // 请求浏览器通知权限（非 Tauri 环境）
     if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
       Notification.requestPermission();
     }
