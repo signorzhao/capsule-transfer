@@ -43,6 +43,17 @@ export const api = {
   send: (payload) =>
     jsonFetch('/p2p/send', { method: 'POST', body: JSON.stringify(payload) }),
 
+  // 接收模式
+  getReceiveMode: () => jsonFetch('/p2p/receive-mode'),
+  setReceiveMode: (mode) =>
+    jsonFetch('/p2p/receive-mode', { method: 'PATCH', body: JSON.stringify({ mode }) }),
+  getPendingRequests: () => jsonFetch('/p2p/pending'),
+  acceptRequest: (id) => jsonFetch(`/p2p/accept/${id}`, { method: 'POST' }),
+  rejectRequest: (id) => jsonFetch(`/p2p/reject/${id}`, { method: 'POST' }),
+
+  // SSE 通知 URL
+  notificationsUrl: `${API_BASE}/p2p/notifications`,
+
   getSettings: () => jsonFetch('/settings'),
   updateSettings: (payload) =>
     jsonFetch('/settings', { method: 'PATCH', body: JSON.stringify(payload) }),

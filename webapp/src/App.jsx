@@ -19,6 +19,10 @@ import {
   Pencil,
   Check,
   X,
+  Shield,
+  ShieldOff,
+  ShieldCheck,
+  Bell,
 } from 'lucide-react';
 
 import NavIcon from './components/NavIcon.jsx';
@@ -65,6 +69,94 @@ function Shell() {
 
   const [isSending, setIsSending] = useState(false);
   const [captureStatus, setCaptureStatus] = useState(null);
+
+  // 接收模式
+  const [receiveMode, setReceiveMode] = useState('auto');
+  const [pendingRequests, setPendingRequests] = useState([]);
+  const [showIncoming, setShowIncoming] = useState(false);
+
+  // 加载接收模式
+  useEffect(() => {
+    api.getReceiveMode().then((r) => setReceiveMode(r.data?.mode || 'auto')).catch(() => {});
+  }, []);
+
+  // SSE 实时通知
+  useEffect(() => {
+    let es;
+    try {
+      es = new EventSource(api.notificationsUrl);
+      es.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'transfer_request') {
+            setPendingRequests((prev) => [...prev, data.request]);
+            setShowIncoming(true);
+            // 浏览器通知
+            if (Notification.permission === 'granted') {
+              new Notification('收到胶囊传输请求', {
+                body: `${data.request.sender_name} 想发送 "${data.request.capsule_name}" 给你`,
+              });
+            }
+            toast.info(`${data.request.sender_name} 请求发送 "${data.request.capsule_name}"`);
+          } else if (data.type === 'capsule_received') {
+            toast.success(`收到新胶囊：${data.capsule?.name}`);
+            refreshAll();
+          }
+        } catch {}
+      };
+    } catch {}
+    // 请求浏览器通知权限
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+    return () => { if (es) es.close(); };
+  }, []);
+
+  // 定期刷新待确认请求
+  useEffect(() => {
+    if (receiveMode !== 'confirm') return;
+    const poll = () => api.getPendingRequests().then((r) => {
+      const items = r.data?.items || [];
+      if (items.length > 0) {
+        setPendingRequests(items);
+        setShowIncoming(true);
+      }
+    }).catch(() => {});
+    poll();
+    const t = setInterval(poll, 3000);
+    return () => clearInterval(t);
+  }, [receiveMode]);
+
+  const handleChangeReceiveMode = async (mode) => {
+    try {
+      await api.setReceiveMode(mode);
+      setReceiveMode(mode);
+      const labels = { off: '关闭接收', confirm: '验证接收', auto: '自动接收' };
+      toast.success(`已切换为「${labels[mode]}」`);
+    } catch (e) {
+      toast.error(`切换失败：${e.message}`);
+    }
+  };
+
+  const handleAcceptRequest = async (req) => {
+    try {
+      await api.acceptRequest(req.id);
+      setPendingRequests((prev) => prev.filter((r) => r.id !== req.id));
+      toast.success(`已接受 ${req.sender_name} 的传输`);
+    } catch (e) {
+      toast.error(`接受失败：${e.message}`);
+    }
+  };
+
+  const handleRejectRequest = async (req) => {
+    try {
+      await api.rejectRequest(req.id);
+      setPendingRequests((prev) => prev.filter((r) => r.id !== req.id));
+      toast.info(`已拒绝 ${req.sender_name} 的传输`);
+    } catch (e) {
+      toast.error(`拒绝失败：${e.message}`);
+    }
+  };
 
   const refreshAll = useCallback(async () => {
     try {
@@ -341,14 +433,70 @@ function Shell() {
               </button>
             )}
           </div>
-          <button
-            onClick={refreshAll}
-            className="text-slate-500 hover:text-slate-200 flex items-center space-x-1 text-xs"
-            title="刷新"
-          >
-            <RefreshCw size={14} />
-            <span>刷新</span>
-          </button>
+          <div className="flex items-center space-x-3">
+            {/* 接收模式开关 */}
+            <div className="flex items-center bg-[#161920] border border-slate-800 rounded-lg overflow-hidden">
+              <button
+                onClick={() => handleChangeReceiveMode('off')}
+                className={`px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider flex items-center space-x-1 transition-all ${
+                  receiveMode === 'off'
+                    ? 'bg-red-500/20 text-red-400 border-r border-red-500/30'
+                    : 'text-slate-500 hover:text-slate-300 border-r border-slate-800'
+                }`}
+                title="关闭接收"
+              >
+                <ShieldOff size={12} />
+                <span>关闭</span>
+              </button>
+              <button
+                onClick={() => handleChangeReceiveMode('confirm')}
+                className={`px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider flex items-center space-x-1 transition-all ${
+                  receiveMode === 'confirm'
+                    ? 'bg-amber-500/20 text-amber-400 border-r border-amber-500/30'
+                    : 'text-slate-500 hover:text-slate-300 border-r border-slate-800'
+                }`}
+                title="验证接收（需确认）"
+              >
+                <ShieldCheck size={12} />
+                <span>验证</span>
+              </button>
+              <button
+                onClick={() => handleChangeReceiveMode('auto')}
+                className={`px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider flex items-center space-x-1 transition-all ${
+                  receiveMode === 'auto'
+                    ? 'bg-emerald-500/20 text-emerald-400'
+                    : 'text-slate-500 hover:text-slate-300'
+                }`}
+                title="自动接收"
+              >
+                <Shield size={12} />
+                <span>自动</span>
+              </button>
+            </div>
+
+            {/* 待确认通知 */}
+            {pendingRequests.length > 0 && (
+              <button
+                onClick={() => setShowIncoming(true)}
+                className="relative p-2 text-amber-400 hover:text-amber-300 transition-colors"
+                title={`${pendingRequests.length} 个待确认请求`}
+              >
+                <Bell size={18} />
+                <span className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-red-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center">
+                  {pendingRequests.length}
+                </span>
+              </button>
+            )}
+
+            <button
+              onClick={refreshAll}
+              className="text-slate-500 hover:text-slate-200 flex items-center space-x-1 text-xs"
+              title="刷新"
+            >
+              <RefreshCw size={14} />
+              <span>刷新</span>
+            </button>
+          </div>
         </header>
 
         <main className="flex-1 overflow-y-auto p-6 custom-scrollbar">
@@ -401,6 +549,16 @@ function Shell() {
       </div>
 
       {captureStatus && <CaptureOverlay status={captureStatus} onClose={() => setCaptureStatus(null)} />}
+
+      {/* 传输确认弹窗 */}
+      {showIncoming && pendingRequests.length > 0 && (
+        <IncomingRequestsOverlay
+          requests={pendingRequests}
+          onAccept={handleAcceptRequest}
+          onReject={handleRejectRequest}
+          onClose={() => setShowIncoming(false)}
+        />
+      )}
     </div>
   );
 }
@@ -1087,6 +1245,77 @@ function Row({ k, v }) {
     <div className="flex justify-between border-b border-slate-800 pb-2">
       <span className="text-slate-500">{k}</span>
       <span className="text-slate-200 font-mono text-right break-all">{v ?? '—'}</span>
+    </div>
+  );
+}
+
+function IncomingRequestsOverlay({ requests, onAccept, onReject, onClose }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <div className="bg-[#1a1d24] border border-slate-700 rounded-3xl p-6 w-[420px] max-h-[80vh] shadow-2xl overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between mb-5">
+          <h3 className="text-lg font-bold text-white flex items-center space-x-2">
+            <Bell size={20} className="text-amber-400" />
+            <span>传输请求</span>
+          </h3>
+          <button
+            onClick={onClose}
+            className="p-1.5 text-slate-500 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto space-y-3 custom-scrollbar">
+          {requests.map((req) => (
+            <div
+              key={req.id}
+              className="bg-[#0f1115] border border-slate-800 rounded-2xl p-4"
+            >
+              <div className="flex items-start justify-between">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center space-x-2 mb-1">
+                    <div className="w-8 h-8 bg-indigo-600/20 rounded-full flex items-center justify-center text-sm font-bold text-indigo-300">
+                      {(req.sender_name || '?')[0]}
+                    </div>
+                    <div>
+                      <p className="text-sm font-bold text-slate-200">{req.sender_name}</p>
+                      <p className="text-[10px] text-slate-500 font-mono">{req.sender_ip}</p>
+                    </div>
+                  </div>
+                  <div className="mt-2 pl-10">
+                    <p className="text-xs text-slate-300">
+                      想发送 <span className="text-indigo-300 font-medium">"{req.capsule_name}"</span>
+                    </p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">
+                      {req.capsule_type && `类型: ${req.capsule_type} · `}
+                      {req.size_bytes ? formatBytes(req.size_bytes) : ''}
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="flex justify-end space-x-2 mt-3">
+                <button
+                  onClick={() => onReject(req)}
+                  className="px-4 py-1.5 text-xs border border-slate-700 text-slate-400 hover:text-red-400 hover:border-red-500/50 rounded-lg transition-all"
+                >
+                  拒绝
+                </button>
+                <button
+                  onClick={() => onAccept(req)}
+                  className="px-4 py-1.5 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-all shadow-lg shadow-indigo-600/20"
+                >
+                  接受
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {requests.length === 0 && (
+          <div className="text-center text-slate-500 text-sm py-8">暂无待确认请求</div>
+        )}
+      </div>
     </div>
   );
 }

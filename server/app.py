@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, jsonify, request, send_file, Response
 from flask_cors import CORS
 
 from bundle import build_bundle, extract_bundle
@@ -83,6 +83,58 @@ HOST = os.getenv("LAN_CAPSULE_HOST", _config.get("host", "0.0.0.0"))
 SHARED_TOKEN = os.getenv("LAN_CAPSULE_SHARED_TOKEN", _config.get("shared_token", "")).strip()
 
 _REAPER_CAPTURE_LOCK = threading.Lock()
+
+# ---------------------- 接收模式 & 传输请求管理 ----------------------
+
+# receive_mode: "off" = 关闭接收, "confirm" = 验证接收, "auto" = 自动接收
+_receive_mode_lock = threading.Lock()
+_receive_mode = _config.get("receive_mode", "auto")
+
+# 待确认的传输请求 {request_id: {...}}
+_pending_requests: dict[str, dict] = {}
+_pending_lock = threading.Lock()
+_PENDING_TIMEOUT = 60  # 请求超时秒数
+
+# SSE 订阅者列表
+_sse_clients: list = []
+_sse_lock = threading.Lock()
+
+
+def _get_receive_mode() -> str:
+    with _receive_mode_lock:
+        return _receive_mode
+
+
+def _set_receive_mode(mode: str):
+    global _receive_mode
+    with _receive_mode_lock:
+        _receive_mode = mode
+    cfg = load_config()
+    cfg["receive_mode"] = mode
+    save_config(cfg)
+
+
+def _cleanup_expired_requests():
+    """清理超时的待确认请求"""
+    now = time.time()
+    with _pending_lock:
+        expired = [k for k, v in _pending_requests.items() if now - v["created_at"] > _PENDING_TIMEOUT]
+        for k in expired:
+            del _pending_requests[k]
+
+
+def _notify_sse(event_data: dict):
+    """向所有 SSE 客户端推送事件"""
+    msg = f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+    with _sse_lock:
+        dead = []
+        for i, q in enumerate(_sse_clients):
+            try:
+                q.append(msg)
+            except Exception:
+                dead.append(i)
+        for i in reversed(dead):
+            _sse_clients.pop(i)
 
 app = Flask(__name__, static_folder=None)
 
@@ -623,12 +675,191 @@ def ping_contact():
 
 # ---------------------- 点对点收发 ----------------------
 
+@app.route("/api/p2p/receive-mode", methods=["GET"])
+def get_receive_mode():
+    """获取当前接收模式"""
+    return _ok({"mode": _get_receive_mode()})
+
+
+@app.route("/api/p2p/receive-mode", methods=["PATCH"])
+def set_receive_mode():
+    """设置接收模式: off / confirm / auto"""
+    data = request.get_json(silent=True) or {}
+    mode = data.get("mode", "").strip()
+    if mode not in ("off", "confirm", "auto"):
+        return _err("mode 必须是 off / confirm / auto", 400)
+    _set_receive_mode(mode)
+    logger.info("接收模式已切换为: %s", mode)
+    return _ok({"mode": mode})
+
+
+@app.route("/api/p2p/request", methods=["POST"])
+def p2p_request():
+    """发送方调用接收方的此接口，请求确认传输。"""
+    mode = _get_receive_mode()
+    if mode == "off":
+        return _err("对方已关闭接收", 403)
+
+    data = request.get_json(silent=True) or {}
+    sender_ip = data.get("sender_ip") or request.remote_addr or "unknown"
+    sender_name = data.get("sender_name") or sender_ip
+    capsule_name = data.get("capsule_name") or "未命名胶囊"
+    capsule_type = data.get("capsule_type") or ""
+    size_bytes = data.get("size_bytes") or 0
+
+    if mode == "auto":
+        # 自动接收模式：直接返回 token
+        token = str(uuid_lib.uuid4())
+        with _pending_lock:
+            _pending_requests[token] = {
+                "id": token,
+                "sender_ip": sender_ip,
+                "sender_name": sender_name,
+                "capsule_name": capsule_name,
+                "capsule_type": capsule_type,
+                "size_bytes": size_bytes,
+                "status": "accepted",
+                "created_at": time.time(),
+            }
+        return _ok({"accept_token": token, "auto_accepted": True})
+
+    # confirm 模式：需要用户确认
+    _cleanup_expired_requests()
+    req_id = str(uuid_lib.uuid4())
+    req_data = {
+        "id": req_id,
+        "sender_ip": sender_ip,
+        "sender_name": sender_name,
+        "capsule_name": capsule_name,
+        "capsule_type": capsule_type,
+        "size_bytes": size_bytes,
+        "status": "pending",
+        "created_at": time.time(),
+    }
+    with _pending_lock:
+        _pending_requests[req_id] = req_data
+
+    # 通知前端
+    _notify_sse({
+        "type": "transfer_request",
+        "request": {
+            "id": req_id,
+            "sender_name": sender_name,
+            "sender_ip": sender_ip,
+            "capsule_name": capsule_name,
+            "capsule_type": capsule_type,
+            "size_bytes": size_bytes,
+        }
+    })
+
+    return _ok({"request_id": req_id, "status": "pending", "timeout": _PENDING_TIMEOUT},
+               message="等待对方确认"), 202
+
+
+@app.route("/api/p2p/pending", methods=["GET"])
+def p2p_pending():
+    """获取待确认的传输请求列表"""
+    _cleanup_expired_requests()
+    with _pending_lock:
+        items = [v for v in _pending_requests.values() if v["status"] == "pending"]
+    return _ok({"items": items})
+
+
+@app.route("/api/p2p/accept/<req_id>", methods=["POST"])
+def p2p_accept(req_id):
+    """接受传输请求，返回 accept_token"""
+    with _pending_lock:
+        req = _pending_requests.get(req_id)
+        if not req:
+            return _err("请求不存在或已过期", 404)
+        if req["status"] != "pending":
+            return _err("请求已处理", 409)
+        req["status"] = "accepted"
+        token = req_id  # 用 request_id 作为 accept_token
+    logger.info("已接受来自 %s 的传输请求", req["sender_name"])
+    return _ok({"accept_token": token})
+
+
+@app.route("/api/p2p/reject/<req_id>", methods=["POST"])
+def p2p_reject(req_id):
+    """拒绝传输请求"""
+    with _pending_lock:
+        req = _pending_requests.get(req_id)
+        if not req:
+            return _err("请求不存在或已过期", 404)
+        if req["status"] != "pending":
+            return _err("请求已处理", 409)
+        req["status"] = "rejected"
+    logger.info("已拒绝来自 %s 的传输请求", req["sender_name"])
+    return _ok({"status": "rejected"})
+
+
+@app.route("/api/p2p/check-request/<req_id>", methods=["GET"])
+def p2p_check_request(req_id):
+    """发送方轮询检查请求状态"""
+    _cleanup_expired_requests()
+    with _pending_lock:
+        req = _pending_requests.get(req_id)
+    if not req:
+        return _err("请求不存在或已过期", 404)
+    result = {"status": req["status"]}
+    if req["status"] == "accepted":
+        result["accept_token"] = req_id
+    return _ok(result)
+
+
+@app.route("/api/p2p/notifications", methods=["GET"])
+def p2p_notifications_sse():
+    """SSE 实时推送传输请求通知"""
+    def stream():
+        q = []
+        with _sse_lock:
+            _sse_clients.append(q)
+        try:
+            yield "data: {\"type\":\"connected\"}\n\n"
+            while True:
+                if q:
+                    msg = q.pop(0)
+                    yield msg
+                else:
+                    time.sleep(0.5)
+                    yield ": heartbeat\n\n"
+        except GeneratorExit:
+            pass
+        finally:
+            with _sse_lock:
+                try:
+                    _sse_clients.remove(q)
+                except ValueError:
+                    pass
+
+    return Response(stream(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @app.route("/api/p2p/import", methods=["POST"])
 def p2p_import():
     """接收对方发来的胶囊。"""
+    mode = _get_receive_mode()
+    if mode == "off":
+        return _err("接收已关闭", 403)
+
+    # 验证 shared_token
     ok, msg = _check_shared_token()
     if not ok:
         return _err(msg or "unauthorized", 401)
+
+    # confirm 模式下验证 accept_token
+    if mode == "confirm":
+        token = request.headers.get("X-Accept-Token", "").strip()
+        if not token:
+            return _err("缺少确认令牌（X-Accept-Token）", 403)
+        with _pending_lock:
+            req = _pending_requests.get(token)
+            if not req or req["status"] != "accepted":
+                return _err("确认令牌无效或未被接受", 403)
+            # 使用后删除
+            del _pending_requests[token]
 
     if "bundle" not in request.files:
         return _err("缺少字段 bundle（zip 文件）", 400)
@@ -650,12 +881,19 @@ def p2p_import():
 
     cap = _capsule_from_dir(final_dir)
     logger.info("接收胶囊 %s 来自 %s (%d bytes)", cap.get("name"), peer_label, size_bytes)
+
+    # 通知前端有新胶囊入库
+    _notify_sse({
+        "type": "capsule_received",
+        "capsule": {"name": cap.get("name"), "source": peer_label}
+    })
+
     return _ok(cap, message="已接收并入库"), 201
 
 
 @app.route("/api/p2p/send", methods=["POST"])
 def p2p_send():
-    """把本机胶囊发送给对方。"""
+    """把本机胶囊发送给对方（两步确认流程）。"""
     data = request.get_json(silent=True) or {}
     capsule_id = data.get("capsule_id")
     target_ip = (data.get("target_ip") or "").strip()
@@ -673,11 +911,71 @@ def p2p_send():
         return _err("胶囊文件目录缺失", 410)
 
     self_info = network_info(PORT)
+
+    # 步骤 1：向对方请求确认
+    try:
+        req_resp = requests.post(
+            f"http://{target_ip}:{target_port}/api/p2p/request",
+            json={
+                "sender_ip": self_info.get("ip", ""),
+                "sender_name": self_info.get("hostname", ""),
+                "capsule_name": cap.get("name", ""),
+                "capsule_type": cap.get("capsule_type", ""),
+                "size_bytes": cap.get("size_bytes", 0),
+            },
+            timeout=10,
+        )
+    except Exception as e:
+        return _err(f"无法连接对方: {e}", 502)
+
+    if req_resp.status_code == 403:
+        return _err("对方已关闭接收", 403)
+    if not req_resp.ok:
+        return _err(f"请求确认失败: HTTP {req_resp.status_code}", 502)
+
+    req_body = req_resp.json()
+    req_data = req_body.get("data", {})
+
+    # 如果自动接受，直接得到 token
+    accept_token = req_data.get("accept_token")
+
+    if not accept_token:
+        # confirm 模式：需要轮询等待对方确认
+        request_id = req_data.get("request_id")
+        if not request_id:
+            return _err("对方返回格式异常", 502)
+
+        # 轮询等待确认（最多 60 秒）
+        poll_start = time.time()
+        while time.time() - poll_start < 65:
+            time.sleep(1.5)
+            try:
+                check_resp = requests.get(
+                    f"http://{target_ip}:{target_port}/api/p2p/check-request/{request_id}",
+                    timeout=5,
+                )
+                if check_resp.ok:
+                    check_data = check_resp.json().get("data", {})
+                    status = check_data.get("status")
+                    if status == "accepted":
+                        accept_token = check_data.get("accept_token")
+                        break
+                    elif status == "rejected":
+                        return _err("对方拒绝了传输请求", 403)
+                    # pending: 继续等待
+            except Exception:
+                pass
+
+        if not accept_token:
+            return _err("等待确认超时，对方未响应", 408)
+
+    # 步骤 2：用 token 上传实际文件
     blob = build_bundle(cap, capsule_root, sender=self_info)
 
     headers = {
         "X-Capsule-Peer-IP": self_info.get("ip", ""),
         "X-Capsule-Peer-Name": self_info.get("hostname", ""),
+        "X-Accept-Token": accept_token,
     }
     if SHARED_TOKEN:
         headers["X-Capsule-Token"] = SHARED_TOKEN
@@ -732,6 +1030,11 @@ def update_settings():
         cfg["port"] = int(data["port"])
     if "shared_token" in data:
         cfg["shared_token"] = data["shared_token"]
+    if "receive_mode" in data:
+        mode = data["receive_mode"]
+        if mode in ("off", "confirm", "auto"):
+            cfg["receive_mode"] = mode
+            _set_receive_mode(mode)
     save_config(cfg)
     return _ok(cfg)
 
