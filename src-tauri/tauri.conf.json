@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-cli/schema.json",
-  "productName": "Sound Capsule",
+  "productName": "CapsuleTransfer",
   "version": "0.7.0",
   "identifier": "com.soundcapsule.lan",
   "build": {
