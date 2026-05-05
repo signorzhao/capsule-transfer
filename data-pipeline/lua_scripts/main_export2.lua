@@ -2523,6 +2523,87 @@ function ExportCapsule()
         return false, "RPP 生成失败（请检查工程是否已保存或路径是否可写）"
     end
 
+    -- 步骤 3.5：补充复制 RPP 中引用但尚未在 Audio 目录中的媒体文件
+    reaper.ShowConsoleMsg("\n=== 补充检查 RPP 媒体引用 ===\n")
+    local rppFile = io.open(rppPath, "r")
+    if rppFile then
+        local rppContent = rppFile:read("*all")
+        rppFile:close()
+        local _, currentProjPath2 = reaper.EnumProjects(-1, "")
+        local currentProjDir2 = GetDirectoryPath(currentProjPath2)
+        local sourceMediaFolder2 = GetProjectMediaFolderName()
+        local supplementCount = 0
+        local modified = false
+        for filePath in rppContent:gmatch('FILE%s+"([^"]+)"') do
+            -- 跳过已是 Audio/ 相对路径的
+            if filePath:match("^Audio/") or filePath:match("^Audio\\") then
+                -- 已正确，跳过
+            else
+                -- 检查文件是否已在 Audio 目录中
+                local fName = filePath:match("([^/\\]+)$")
+                if fName then
+                    local audioTarget = JoinPath(audioDir, fName)
+                    local existCheck = io.open(audioTarget, "r")
+                    if existCheck then
+                        existCheck:close()
+                    else
+                        -- 文件不在 Audio 目录，尝试找到并复制
+                        local srcPath = nil
+                        if filePath:match("^/") or filePath:match("^[A-Za-z]:") then
+                            srcPath = filePath
+                        elseif currentProjDir2 and currentProjDir2 ~= "" then
+                            local testPaths = {
+                                JoinPath(currentProjDir2, filePath),
+                                JoinPath(currentProjDir2, sourceMediaFolder2, fName),
+                                JoinPath(currentProjDir2, "Audio", fName),
+                            }
+                            for _, tp in ipairs(testPaths) do
+                                local tf = io.open(tp, "r")
+                                if tf then tf:close(); srcPath = tp; break end
+                            end
+                        end
+                        if srcPath then
+                            local sf = io.open(srcPath, "r")
+                            if sf then
+                                sf:close()
+                                CopyFile(srcPath, audioTarget)
+                                supplementCount = supplementCount + 1
+                                reaper.ShowConsoleMsg("  补充复制: " .. fName .. "\n")
+                                modified = true
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        -- 如果有补充复制，重新替换 RPP 中的路径
+        if modified then
+            rppFile = io.open(rppPath, "r")
+            if rppFile then
+                rppContent = rppFile:read("*all")
+                rppFile:close()
+                rppContent = rppContent:gsub('(FILE%s+")([^"]-)"', function(prefix, fp)
+                    if fp:match("^Audio/") or fp:match("^Audio\\") then
+                        return prefix .. fp .. '"'
+                    end
+                    local fn = fp:match("([^/\\]+)$")
+                    if fn then
+                        local at = JoinPath(audioDir, fn)
+                        local af = io.open(at, "r")
+                        if af then
+                            af:close()
+                            return prefix .. "Audio/" .. fn .. '"'
+                        end
+                    end
+                    return prefix .. fp .. '"'
+                end)
+                local wf = io.open(rppPath, "w")
+                if wf then wf:write(rppContent); wf:close() end
+            end
+        end
+        reaper.ShowConsoleMsg("  补充复制了 " .. supplementCount .. " 个文件\n")
+    end
+
     -- 步骤 4：生成 metadata.json
     GenerateCapsuleMetadata(outputDir, capsuleName, capsuleType, collectedItemsInfo, mediaFiles, failedFiles)
 
