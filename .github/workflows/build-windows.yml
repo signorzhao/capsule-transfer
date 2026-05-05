@@ -45,6 +45,7 @@ jobs:
 
       - name: Copy server modules into package
         run: |
+          New-Item -ItemType Directory -Force dist/CapsuleTransfer/server
           Copy-Item server/app.py dist/CapsuleTransfer/server/
           Copy-Item server/bundle.py dist/CapsuleTransfer/server/
           Copy-Item server/net.py dist/CapsuleTransfer/server/
