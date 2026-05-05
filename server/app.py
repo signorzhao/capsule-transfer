@@ -465,6 +465,19 @@ def open_capsule_rpp(cap_id: str):
             subprocess.Popen(["open", str(rpp_path)])
         elif platform.system() == "Windows":
             os.startfile(str(rpp_path))
+            import time as _time
+            _time.sleep(1.0)
+            try:
+                import ctypes
+                user32 = ctypes.windll.user32
+                hwnd = user32.FindWindowW("REAPERwnd", None)
+                if hwnd:
+                    SW_RESTORE = 9
+                    if user32.IsIconic(hwnd):
+                        user32.ShowWindow(hwnd, SW_RESTORE)
+                    user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
         else:
             subprocess.Popen(["xdg-open", str(rpp_path)])
     except Exception as e:
