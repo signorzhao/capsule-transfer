@@ -1,5 +1,5 @@
 [package]
-name = "capsule-transfer"
+name = "CapsuleTransfer"
 version = "0.7.0"
 description = "Sound Capsule LAN Transfer"
 authors = ["signorzhao"]
