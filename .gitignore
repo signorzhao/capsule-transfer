@@ -1,0 +1,26 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Node
+webapp/node_modules/
+webapp/dist/
+
+# 数据与日志
+server/data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# 环境变量
+.env
+
+# 编辑器
+.DS_Store
+.idea/
+.vscode/
+
+# macOS compiled binary (rebuild from .swift source)
+data-pipeline/scripts/render_background_mac
