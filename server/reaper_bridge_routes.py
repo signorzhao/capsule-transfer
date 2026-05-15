@@ -8,20 +8,11 @@ show bridge readiness and perform the one-time bridge installation.
 from __future__ import annotations
 
 import json
-import os
 import platform
 import subprocess
 import time
 from pathlib import Path
 from typing import Callable
-
-
-def _json_ok(data=None, **kwargs):
-    payload = {"success": True}
-    if data is not None:
-        payload["data"] = data
-    payload.update(kwargs)
-    return payload
 
 
 def _find_reaper_executable(load_config: Callable[[], dict]) -> Path | None:
@@ -51,7 +42,6 @@ def _find_reaper_executable(load_config: Callable[[], dict]) -> Path | None:
         ]
     else:
         import shutil
-
         found = shutil.which("reaper")
         candidates = [Path(found)] if found else [Path("/usr/bin/reaper")]
 
@@ -86,13 +76,36 @@ def _run_reaper_script(reaper_exe: Path, lua_script: Path) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def _read_install_result(client, timeout_seconds: float = 10.0) -> tuple[dict | None, str]:
+    started = time.time()
+    last_raw = ""
+    while time.time() - started < timeout_seconds:
+        try:
+            raw = client.get_extstate("install_result")
+        except Exception as exc:
+            last_raw = f"EXTSTATE_READ_ERROR: {exc}"
+            time.sleep(0.25)
+            continue
+
+        if raw:
+            last_raw = raw
+            try:
+                return json.loads(raw), raw
+            except Exception:
+                # Raw protocol echoes or partial writes should not make install fatal.
+                if raw.startswith("EXTSTATE "):
+                    return None, raw
+                return {"success": False, "message": raw}, raw
+        time.sleep(0.25)
+    return None, last_raw
+
+
 def register_reaper_bridge_routes(app, ok, err, data_pipeline_dir: Path, load_config: Callable[[], dict]):
     @app.route("/api/reaper/bridge/status", methods=["GET"])
     def reaper_bridge_status():
         port = int((load_config() or {}).get("webui_port", 9000))
         try:
             from exporters.reaper_bridge_client import get_bridge_status
-
             status = get_bridge_status(webui_port=port)
         except Exception as exc:
             status = {
@@ -104,13 +117,11 @@ def register_reaper_bridge_routes(app, ok, err, data_pipeline_dir: Path, load_co
             }
 
         lua_dir = data_pipeline_dir / "lua_scripts"
-        status.update(
-            {
-                "webui_port": port,
-                "bridge_script": str(lua_dir / "capsule_bridge.lua"),
-                "installer_script": str(lua_dir / "install_capsule_bridge.lua"),
-            }
-        )
+        status.update({
+            "webui_port": port,
+            "bridge_script": str(lua_dir / "capsule_bridge.lua"),
+            "installer_script": str(lua_dir / "install_capsule_bridge.lua"),
+        })
         return ok(status)
 
     @app.route("/api/reaper/bridge/install", methods=["POST"])
@@ -126,18 +137,18 @@ def register_reaper_bridge_routes(app, ok, err, data_pipeline_dir: Path, load_co
         if not installer_script.exists():
             return err(f"bridge 安装脚本不存在: {installer_script}", 500)
 
+        client = None
+        webui_available = False
         try:
             from exporters.reaper_bridge_client import ReaperBridgeClient
-
             client = ReaperBridgeClient(port=port)
-            if client.test_webui():
-                try:
-                    client.set_extstate("install_bridge_source", str(bridge_script).replace("\\", "/"))
-                    client.set_extstate("install_result", "")
-                except Exception:
-                    pass
+            webui_available = client.test_webui()
+            if webui_available:
+                client.set_extstate("install_bridge_source", str(bridge_script).replace("\\", "/"))
+                client.set_extstate("install_result", "")
         except Exception:
-            pass
+            client = None
+            webui_available = False
 
         reaper_exe = _find_reaper_executable(load_config)
         if not reaper_exe:
@@ -148,43 +159,38 @@ def register_reaper_bridge_routes(app, ok, err, data_pipeline_dir: Path, load_co
             return err(f"启动 bridge 安装脚本失败: {launch_error}", 500)
 
         result_payload = None
-        try:
-            from exporters.reaper_bridge_client import ReaperBridgeClient
+        raw_result = ""
+        if client and webui_available:
+            result_payload, raw_result = _read_install_result(client, timeout_seconds=10)
 
-            client = ReaperBridgeClient(port=port)
-            started = time.time()
-            while time.time() - started < 10:
-                raw = client.get_extstate("install_result")
-                if raw:
-                    try:
-                        result_payload = json.loads(raw)
-                    except Exception:
-                        result_payload = {"success": False, "message": raw}
-                    break
-                time.sleep(0.25)
-        except Exception:
-            result_payload = None
-
-        # The installer may have been started successfully even if Web Interface
-        # result polling is unavailable yet. Return a useful pending state.
+        # If Web Interface polling is unavailable or the value is still empty,
+        # the installer may still have been delivered to REAPER. Do not fail hard;
+        # let the frontend re-check bridge status.
         if not result_payload:
-            return ok(
-                {
-                    "installed": False,
-                    "pending": True,
-                    "message": "已发送安装命令。请确认 REAPER 已打开；几秒后重新检测 Bridge 状态。",
-                    "reaper_exe": str(reaper_exe),
-                }
-            )
+            return ok({
+                "installed": False,
+                "pending": True,
+                "message": "已发送安装命令。请确认 REAPER 已打开；几秒后点击“重新检测”。",
+                "reaper_exe": str(reaper_exe),
+                "webui_available": webui_available,
+                "raw_install_result": raw_result,
+            })
 
         if not result_payload.get("success"):
-            return err(result_payload.get("message") or "Bridge 安装失败", 500)
-
-        return ok(
-            {
-                "installed": True,
+            return ok({
+                "installed": False,
                 "pending": False,
-                "message": result_payload.get("message") or "Capsule Transfer Bridge 已安装并启动",
+                "message": result_payload.get("message") or "Bridge 安装脚本返回失败",
                 "reaper_exe": str(reaper_exe),
-            }
-        )
+                "webui_available": webui_available,
+                "raw_install_result": raw_result,
+            })
+
+        return ok({
+            "installed": True,
+            "pending": False,
+            "message": result_payload.get("message") or "Capsule Transfer Bridge 已安装并启动",
+            "reaper_exe": str(reaper_exe),
+            "webui_available": webui_available,
+            "raw_install_result": raw_result,
+        })
