@@ -18,7 +18,6 @@ from urllib.parse import quote
 import requests
 
 from common import PathManager
-from exporters.reaper_webui_export import sanitize_path_for_lua
 
 SECTION = "capsule_transfer"
 BRIDGE_TIMEOUT_SECONDS = 180
@@ -27,6 +26,19 @@ POLL_INTERVAL_SECONDS = 0.2
 
 class ReaperBridgeError(RuntimeError):
     """Raised when the persistent REAPER bridge is unavailable or fails."""
+
+
+def sanitize_path_for_lua(path: str) -> str:
+    """Convert a filesystem path to a Lua-friendly absolute path string."""
+    if not path:
+        return ""
+
+    is_absolute = Path(path).is_absolute()
+    if not is_absolute and len(path) >= 2 and path[1] == ":":
+        is_absolute = True
+    if not is_absolute:
+        raise ValueError(f"export_dir 必须是绝对路径: {path}")
+    return path.replace("\\", "/")
 
 
 @dataclass
@@ -58,12 +70,10 @@ class ReaperBridgeClient:
         return requests.get(f"{self.base_url}{path}", timeout=timeout or self.timeout)
 
     def _reaper_api(self, command: str, timeout: Optional[float] = None) -> requests.Response:
-        # REAPER's Web Interface accepts commands at /_/COMMAND.
         return self._get(f"/_/{command}", timeout=timeout)
 
     @staticmethod
     def _set_extstate_command(section: str, key: str, value: str) -> str:
-        # Named command accepted by REAPER Web Interface.
         return f"SET/EXTSTATE/{quote(section, safe='')}/{quote(key, safe='')}/{quote(value, safe='')}"
 
     @staticmethod
