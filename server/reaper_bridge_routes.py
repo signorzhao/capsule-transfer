@@ -1,0 +1,190 @@
+"""Flask routes for Capsule Transfer's persistent REAPER bridge.
+
+The runtime export path is focus-safe and goes through the REAPER Web Interface
+plus the long-running capsule_bridge.lua script. These routes help the frontend
+show bridge readiness and perform the one-time bridge installation.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import platform
+import subprocess
+import time
+from pathlib import Path
+from typing import Callable
+
+
+def _json_ok(data=None, **kwargs):
+    payload = {"success": True}
+    if data is not None:
+        payload["data"] = data
+    payload.update(kwargs)
+    return payload
+
+
+def _find_reaper_executable(load_config: Callable[[], dict]) -> Path | None:
+    system = platform.system()
+    cfg = load_config() or {}
+    configured = cfg.get("reaper_path")
+    if configured:
+        p = Path(configured)
+        if p.is_dir() and p.suffix == ".app":
+            p = p / "Contents" / "MacOS" / "REAPER"
+        if p.exists() and p.is_file():
+            return p
+
+    if system == "Darwin":
+        candidates = [
+            Path("/Applications/REAPER.app/Contents/MacOS/REAPER"),
+            Path("/Applications/REAPER64.app/Contents/MacOS/REAPER"),
+            Path.home() / "Applications/REAPER.app/Contents/MacOS/REAPER",
+        ]
+    elif system == "Windows":
+        candidates = [
+            Path("C:/Program Files/REAPER (x64)/reaper.exe"),
+            Path("C:/Program Files/REAPER (arm64)/reaper.exe"),
+            Path("C:/Program Files/REAPER/reaper.exe"),
+            Path("C:/Program Files (x86)/REAPER/reaper.exe"),
+            Path.home() / "AppData/Local/Programs/REAPER/reaper.exe",
+        ]
+    else:
+        import shutil
+
+        found = shutil.which("reaper")
+        candidates = [Path(found)] if found else [Path("/usr/bin/reaper")]
+
+    for p in candidates:
+        if p.exists() and p.is_file():
+            return p
+    return None
+
+
+def _run_reaper_script(reaper_exe: Path, lua_script: Path) -> tuple[bool, str]:
+    system = platform.system()
+    try:
+        if system == "Windows":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            subprocess.Popen(
+                [str(reaper_exe), "-nonewinst", str(lua_script).replace("/", "\\")],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                startupinfo=startupinfo,
+            )
+        else:
+            subprocess.Popen(
+                [str(reaper_exe), "-nonewinst", str(lua_script)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+def register_reaper_bridge_routes(app, ok, err, data_pipeline_dir: Path, load_config: Callable[[], dict]):
+    @app.route("/api/reaper/bridge/status", methods=["GET"])
+    def reaper_bridge_status():
+        port = int((load_config() or {}).get("webui_port", 9000))
+        try:
+            from exporters.reaper_bridge_client import get_bridge_status
+
+            status = get_bridge_status(webui_port=port)
+        except Exception as exc:
+            status = {
+                "webui_available": False,
+                "bridge_available": False,
+                "bridge_version": "",
+                "status": "unknown",
+                "error": str(exc),
+            }
+
+        lua_dir = data_pipeline_dir / "lua_scripts"
+        status.update(
+            {
+                "webui_port": port,
+                "bridge_script": str(lua_dir / "capsule_bridge.lua"),
+                "installer_script": str(lua_dir / "install_capsule_bridge.lua"),
+            }
+        )
+        return ok(status)
+
+    @app.route("/api/reaper/bridge/install", methods=["POST"])
+    def install_reaper_bridge():
+        cfg = load_config() or {}
+        port = int(cfg.get("webui_port", 9000))
+        lua_dir = data_pipeline_dir / "lua_scripts"
+        bridge_script = lua_dir / "capsule_bridge.lua"
+        installer_script = lua_dir / "install_capsule_bridge.lua"
+
+        if not bridge_script.exists():
+            return err(f"bridge 脚本不存在: {bridge_script}", 500)
+        if not installer_script.exists():
+            return err(f"bridge 安装脚本不存在: {installer_script}", 500)
+
+        try:
+            from exporters.reaper_bridge_client import ReaperBridgeClient
+
+            client = ReaperBridgeClient(port=port)
+            if client.test_webui():
+                try:
+                    client.set_extstate("install_bridge_source", str(bridge_script).replace("\\", "/"))
+                    client.set_extstate("install_result", "")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        reaper_exe = _find_reaper_executable(load_config)
+        if not reaper_exe:
+            return err("找不到 REAPER 可执行文件，请先在设置中配置 REAPER 路径。", 400)
+
+        launched, launch_error = _run_reaper_script(reaper_exe, installer_script)
+        if not launched:
+            return err(f"启动 bridge 安装脚本失败: {launch_error}", 500)
+
+        result_payload = None
+        try:
+            from exporters.reaper_bridge_client import ReaperBridgeClient
+
+            client = ReaperBridgeClient(port=port)
+            started = time.time()
+            while time.time() - started < 10:
+                raw = client.get_extstate("install_result")
+                if raw:
+                    try:
+                        result_payload = json.loads(raw)
+                    except Exception:
+                        result_payload = {"success": False, "message": raw}
+                    break
+                time.sleep(0.25)
+        except Exception:
+            result_payload = None
+
+        # The installer may have been started successfully even if Web Interface
+        # result polling is unavailable yet. Return a useful pending state.
+        if not result_payload:
+            return ok(
+                {
+                    "installed": False,
+                    "pending": True,
+                    "message": "已发送安装命令。请确认 REAPER 已打开；几秒后重新检测 Bridge 状态。",
+                    "reaper_exe": str(reaper_exe),
+                }
+            )
+
+        if not result_payload.get("success"):
+            return err(result_payload.get("message") or "Bridge 安装失败", 500)
+
+        return ok(
+            {
+                "installed": True,
+                "pending": False,
+                "message": result_payload.get("message") or "Capsule Transfer Bridge 已安装并启动",
+                "reaper_exe": str(reaper_exe),
+            }
+        )
