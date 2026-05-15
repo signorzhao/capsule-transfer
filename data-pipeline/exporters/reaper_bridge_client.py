@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import requests
 
@@ -39,6 +39,30 @@ def sanitize_path_for_lua(path: str) -> str:
     if not is_absolute:
         raise ValueError(f"export_dir 必须是绝对路径: {path}")
     return path.replace("\\", "/")
+
+
+def parse_extstate_reply(text: str, section: str, key: str) -> str:
+    """Extract value from REAPER Web Interface GET/EXTSTATE response.
+
+    REAPER can return either a raw value or a line like:
+      EXTSTATE capsule_transfer install_result {json...}
+    Empty values often come back as just:
+      EXTSTATE capsule_transfer install_result
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+
+    prefix = f"EXTSTATE {section} {key}"
+    for line in raw.splitlines():
+        line = line.strip()
+        if line == prefix:
+            return ""
+        if line.startswith(prefix + " "):
+            return unquote(line[len(prefix) + 1:].strip())
+
+    # Some builds return percent-encoded raw value only.
+    return unquote(raw)
 
 
 @dataclass
@@ -95,7 +119,7 @@ class ReaperBridgeClient:
         resp = self._reaper_api(self._get_extstate_command(SECTION, key))
         if not resp.ok:
             raise ReaperBridgeError(f"读取 REAPER EXTSTATE 失败: HTTP {resp.status_code}")
-        return resp.text.strip()
+        return parse_extstate_reply(resp.text, SECTION, key)
 
     def status(self) -> BridgeStatus:
         if not self.test_webui():
@@ -107,11 +131,11 @@ class ReaperBridgeClient:
         try:
             version = self.get_extstate("bridge_version")
             state = self.get_extstate("status") or "unknown"
-            available = bool(version)
+            available = bool(version) and not version.startswith("EXTSTATE ")
             return BridgeStatus(
                 webui_available=True,
                 bridge_available=available,
-                bridge_version=version,
+                bridge_version=version if available else "",
                 status=state,
                 error="" if available else "REAPER 已连接，但 Capsule Transfer Bridge 尚未运行。",
             )
