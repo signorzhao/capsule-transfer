@@ -43,6 +43,9 @@ export const api = {
   send: (payload) =>
     jsonFetch('/p2p/send', { method: 'POST', body: JSON.stringify(payload) }),
 
+  getReaperBridgeStatus: () => jsonFetch('/reaper/bridge/status'),
+  installReaperBridge: () => jsonFetch('/reaper/bridge/install', { method: 'POST' }),
+
   getSettings: () => jsonFetch('/settings'),
   updateSettings: (payload) =>
     jsonFetch('/settings', { method: 'PATCH', body: JSON.stringify(payload) }),
