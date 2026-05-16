@@ -32,6 +32,26 @@ local function CurrentScriptDir()
   return path:match("(.*[/\\])") or ""
 end
 
+local function StartupBlock(bridge_path)
+  return
+    "-- >>> Capsule Transfer Bridge >>>\n" ..
+    "pcall(function() dofile(" .. string.format("%q", bridge_path) .. ") end)\n" ..
+    "-- <<< Capsule Transfer Bridge <<<\n"
+end
+
+local function StartBridge(bridge_path)
+  local bridge_func, load_err = loadfile(bridge_path)
+  if not bridge_func then
+    return false, "无法加载 bridge: " .. tostring(load_err)
+  end
+
+  local ok, err = pcall(bridge_func)
+  if not ok then
+    return false, "启动 bridge 失败: " .. tostring(err)
+  end
+  return true, ""
+end
+
 local function Main()
   local bridge_path = reaper.GetExtState(SECTION, "install_bridge_source")
   if not bridge_path or bridge_path == "" then
@@ -53,9 +73,7 @@ local function Main()
   local startup_path = scripts_dir .. "/__startup.lua"
   local marker_begin = "-- >>> Capsule Transfer Bridge >>>"
   local marker_end = "-- <<< Capsule Transfer Bridge <<<"
-  local block = marker_begin .. "\n" ..
-    "pcall(function() dofile(" .. string.format("%q", bridge_path) .. ") end)\n" ..
-    marker_end .. "\n"
+  local block = StartupBlock(bridge_path)
 
   local existing = ""
   local rf = io.open(startup_path, "r")
@@ -64,7 +82,20 @@ local function Main()
     rf:close()
   end
 
-  if not existing:find(marker_begin, 1, true) then
+  local marker_start = existing:find(marker_begin, 1, true)
+  local marker_stop = marker_start and existing:find(marker_end, marker_start, true) or nil
+  if marker_start and marker_stop then
+    local after_marker = marker_stop + #marker_end
+    local next_newline = existing:find("\n", after_marker, true) or #existing
+    existing = existing:sub(1, marker_start - 1) .. block .. existing:sub(next_newline + 1)
+    local wf = io.open(startup_path, "w")
+    if not wf then
+      WriteResult(false, "无法更新 REAPER 启动脚本: " .. startup_path)
+      return
+    end
+    wf:write(existing)
+    wf:close()
+  else
     local wf = io.open(startup_path, "a")
     if not wf then
       WriteResult(false, "无法写入 REAPER 启动脚本: " .. startup_path)
@@ -77,19 +108,12 @@ local function Main()
     wf:close()
   end
 
-  local bridge_func, load_err = loadfile(bridge_path)
-  if not bridge_func then
-    WriteResult(false, "无法加载 bridge: " .. tostring(load_err))
+  local started, start_err = StartBridge(bridge_path)
+  if not started then
+    WriteResult(false, start_err)
     return
   end
 
-  local ok, err = pcall(bridge_func)
-  if not ok then
-    WriteResult(false, "启动 bridge 失败: " .. tostring(err))
-    return
-  end
-
-  reaper.SetExtState(SECTION, "bridge_version", "1.0.0", false)
   WriteResult(true, "Capsule Transfer Bridge 已安装并启动")
 end
 

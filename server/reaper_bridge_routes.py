@@ -124,6 +124,26 @@ def register_reaper_bridge_routes(app, ok, err, data_pipeline_dir: Path, load_co
         })
         return ok(status)
 
+    @app.route("/api/reaper/bridge/ping", methods=["GET", "POST"])
+    def ping_reaper_bridge():
+        port = int((load_config() or {}).get("webui_port", 9000))
+        try:
+            from exporters.reaper_bridge_client import ReaperBridgeClient
+            client = ReaperBridgeClient(port=port)
+            result = client.ping()
+            return ok({
+                "ping": result,
+                "diagnostics": client._diagnostics(),
+            })
+        except Exception as exc:
+            diagnostics = ""
+            try:
+                from exporters.reaper_bridge_client import ReaperBridgeClient
+                diagnostics = ReaperBridgeClient(port=port)._diagnostics()
+            except Exception:
+                diagnostics = ""
+            return err(f"Bridge ping 失败: {exc}" + (f"\n诊断: {diagnostics}" if diagnostics else ""), 500)
+
     @app.route("/api/reaper/bridge/install", methods=["POST"])
     def install_reaper_bridge():
         cfg = load_config() or {}

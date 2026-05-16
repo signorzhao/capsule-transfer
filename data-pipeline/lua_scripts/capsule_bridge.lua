@@ -3,14 +3,33 @@
 -- Install once, then keep REAPER open/minimized while Capsule Transfer sends commands.
 
 local SECTION = "capsule_transfer"
-local BRIDGE_VERSION = "1.0.2"
+local BRIDGE_VERSION = "1.0.4"
+local HEARTBEAT_STALE_SECONDS = 15
+local COMMAND_KEY = "command_v2"
+local RESULT_KEY = "result_v2"
+local HEARTBEAT_KEY = "heartbeat_v2"
+local VERSION_KEY = "bridge_version_v2"
+local RUNNING_KEY = "_CAPSULE_TRANSFER_BRIDGE_V2_RUNNING"
 
-if _CAPSULE_TRANSFER_BRIDGE_RUNNING then
-  return
+if _G[RUNNING_KEY] then
+  local last_heartbeat = tonumber(reaper.GetExtState(SECTION, HEARTBEAT_KEY) or "")
+  local status = reaper.GetExtState(SECTION, "status")
+  local age = last_heartbeat and (os.time() - last_heartbeat) or nil
+  if status == "exporting" or (age and age >= 0 and age <= HEARTBEAT_STALE_SECONDS) then
+    return
+  end
 end
+_G[RUNNING_KEY] = true
 _CAPSULE_TRANSFER_BRIDGE_RUNNING = true
 
+local function Heartbeat()
+  local now = tostring(os.time())
+  reaper.SetExtState(SECTION, HEARTBEAT_KEY, now, false)
+  reaper.SetExtState(SECTION, "heartbeat", now, false)
+end
+
 local function Phase(msg)
+  Heartbeat()
   reaper.SetExtState(SECTION, "export_phase", tostring(msg or ""), false)
 end
 
@@ -50,13 +69,14 @@ local function WriteJsonResult(success, request_id, capsule_name, error_msg, ext
   end
   table.insert(parts, '}')
   local payload = table.concat(parts)
+  reaper.SetExtState(SECTION, RESULT_KEY, payload, false)
   reaper.SetExtState(SECTION, "result", payload, false)
   reaper.SetExtState(SECTION, "last_result_debug", payload, false)
 end
 
 local function ExtractJsonString(json, key)
   if not json or not key then return nil end
-  local pattern = '"' .. key .. '"%s*:%s*"(([^"\\]|\\.)*)"'
+  local pattern = '"' .. key .. '"%s*:%s*"(.-)"'
   local raw = json:match(pattern)
   if not raw then return nil end
   raw = raw:gsub('\\"', '"')
@@ -95,6 +115,21 @@ local function IsWindows()
   return package.config:sub(1,1) == "\\"
 end
 
+local function JoinPath(base, name)
+  base = tostring(base or ""):gsub("[/\\]+$", "")
+  if base == "" then return tostring(name or "") end
+  return base .. "/" .. tostring(name or "")
+end
+
+local function FileExists(path)
+  local f = io.open(path, "r")
+  if f then
+    f:close()
+    return true
+  end
+  return false
+end
+
 local function ScriptDir()
   local src = debug.getinfo(1).source or ""
   local path = src:match("@(.*)$") or src
@@ -124,7 +159,7 @@ local function RunExport(cmd)
   _SYNEST_AUTO_EXPORT = {
     project_name = cmd.project_name or cmd.capsule_type or "magic",
     theme_name = cmd.theme_name or cmd.capsule_type or "magic",
-    render_preview = false,
+    render_preview = requested_preview,
     capsule_type = cmd.capsule_type or "magic",
     capsule_name = capsule_name,
     export_dir = cmd.export_dir,
@@ -160,7 +195,21 @@ local function RunExport(cmd)
   end
   if r1 == true then
     Phase("main_export2 returned success")
-    return true, final_capsule_name, nil, requested_preview
+    local preview_rendered = false
+    local preview_audio = ""
+    if requested_preview and cmd.export_dir and final_capsule_name then
+      local capsule_dir = JoinPath(cmd.export_dir, final_capsule_name)
+      local ogg_name = final_capsule_name .. ".ogg"
+      local wav_name = final_capsule_name .. ".wav"
+      if FileExists(JoinPath(capsule_dir, ogg_name)) then
+        preview_rendered = true
+        preview_audio = ogg_name
+      elseif FileExists(JoinPath(capsule_dir, wav_name)) then
+        preview_rendered = true
+        preview_audio = wav_name
+      end
+    end
+    return true, final_capsule_name, nil, requested_preview, preview_rendered, preview_audio
   end
 
   local err = (type(r2) == "string" and r2 ~= "") and r2 or "导出失败：请确认 REAPER 中已选中至少一个 Audio Item"
@@ -181,15 +230,16 @@ local function HandleCommand(raw)
 
   reaper.SetExtState(SECTION, "status", "exporting", false)
   Phase("bridge received export command")
-  local ok, capsule_name, err, preview_requested = RunExport(cmd)
+  local ok, capsule_name, err, preview_requested, preview_rendered, preview_audio = RunExport(cmd)
   reaper.SetExtState(SECTION, "status", "idle", false)
   if ok then
     Phase("writing bridge success result")
     WriteJsonResult(true, cmd.request_id, capsule_name, nil, {
       mode = "bridge",
       preview_requested = preview_requested == true,
-      preview_rendered = false,
-      preview_note = preview_requested and "Bridge mode skipped preview render to avoid blocking REAPER while minimized" or "preview disabled",
+      preview_rendered = preview_rendered == true,
+      preview_audio = preview_audio or "",
+      preview_note = preview_requested and ((preview_rendered == true) and "preview rendered" or "preview requested but output file was not found") or "preview disabled",
     })
     Phase("idle")
   else
@@ -199,13 +249,14 @@ local function HandleCommand(raw)
   end
 end
 
-local function Poll()
+local function PollOnce()
+  reaper.SetExtState(SECTION, VERSION_KEY, BRIDGE_VERSION, false)
   reaper.SetExtState(SECTION, "bridge_version", BRIDGE_VERSION, false)
-  reaper.SetExtState(SECTION, "heartbeat", tostring(os.time()), false)
+  Heartbeat()
 
-  local raw = reaper.GetExtState(SECTION, "command")
+  local raw = reaper.GetExtState(SECTION, COMMAND_KEY)
   if raw and raw ~= "" then
-    reaper.SetExtState(SECTION, "command", "", false)
+    reaper.SetExtState(SECTION, COMMAND_KEY, "", false)
     local ok, err = pcall(HandleCommand, raw)
     if not ok then
       local request_id = ExtractJsonString(raw, "request_id") or ""
@@ -215,9 +266,20 @@ local function Poll()
     end
   end
 
+end
+
+local function Poll()
+  local ok, err = pcall(PollOnce)
+  if not ok then
+    reaper.SetExtState(SECTION, "status", "idle", false)
+    Phase("bridge poll error")
+    WriteJsonResult(false, "", nil, "bridge 轮询失败: " .. tostring(err), { mode = "bridge" })
+  end
   reaper.defer(Poll)
 end
 
+reaper.SetExtState(SECTION, COMMAND_KEY, "", false)
+reaper.SetExtState(SECTION, RESULT_KEY, "", false)
 reaper.SetExtState(SECTION, "status", "idle", false)
 Phase("idle")
 Poll()

@@ -21,7 +21,9 @@ from common import PathManager
 
 SECTION = "capsule_transfer"
 BRIDGE_TIMEOUT_SECONDS = 45
+PREVIEW_BRIDGE_TIMEOUT_SECONDS = 120
 POLL_INTERVAL_SECONDS = 0.2
+HEARTBEAT_STALE_SECONDS = 10
 
 
 class ReaperBridgeError(RuntimeError):
@@ -44,13 +46,11 @@ def parse_extstate_reply(text: str, section: str, key: str) -> str:
     raw = (text or "").strip()
     if not raw:
         return ""
-    prefix = f"EXTSTATE {section} {key}"
     for line in raw.splitlines():
         line = line.strip()
-        if line == prefix:
-            return ""
-        if line.startswith(prefix + " "):
-            return unquote(line[len(prefix) + 1:].strip())
+        parts = line.split(None, 3)
+        if len(parts) >= 3 and parts[0] == "EXTSTATE" and parts[1] == section and parts[2] == key:
+            return unquote(parts[3].strip()) if len(parts) >= 4 else ""
     return unquote(raw)
 
 
@@ -63,6 +63,9 @@ class BridgeStatus:
     error: str = ""
     export_phase: str = ""
     last_result_debug: str = ""
+    heartbeat: str = ""
+    heartbeat_age_seconds: Optional[float] = None
+    bridge_protocol: int = 1
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -73,6 +76,9 @@ class BridgeStatus:
             "error": self.error,
             "export_phase": self.export_phase,
             "last_result_debug": self.last_result_debug,
+            "heartbeat": self.heartbeat,
+            "heartbeat_age_seconds": self.heartbeat_age_seconds,
+            "bridge_protocol": self.bridge_protocol,
         }
 
 
@@ -84,7 +90,10 @@ class ReaperBridgeClient:
         self.base_url = f"http://{host}:{port}"
 
     def _get(self, path: str, timeout: Optional[float] = None) -> requests.Response:
-        return requests.get(f"{self.base_url}{path}", timeout=timeout or self.timeout)
+        resp = requests.get(f"{self.base_url}{path}", timeout=timeout or self.timeout)
+        if not resp.encoding or resp.encoding.lower() in {"iso-8859-1", "latin-1"}:
+            resp.encoding = "utf-8"
+        return resp
 
     def _reaper_api(self, command: str, timeout: Optional[float] = None) -> requests.Response:
         return self._get(f"/_/{command}", timeout=timeout)
@@ -118,28 +127,68 @@ class ReaperBridgeClient:
         if not self.test_webui():
             return BridgeStatus(False, False, error="无法连接 REAPER Web Interface，请确认 REAPER 已打开并启用 Web Interface。")
         try:
-            version = self.get_extstate("bridge_version")
+            v2_version = self.get_extstate("bridge_version_v2")
+            v2_heartbeat = self.get_extstate("heartbeat_v2")
+            version = v2_version or self.get_extstate("bridge_version")
             state = self.get_extstate("status") or "unknown"
             phase = self.get_extstate("export_phase")
             last_result = self.get_extstate("last_result_debug")
-            available = bool(version) and not version.startswith("EXTSTATE ")
+            heartbeat = v2_heartbeat or self.get_extstate("heartbeat")
+            bridge_protocol = 2 if v2_version and v2_heartbeat else 1
+            heartbeat_age = None
+            heartbeat_fresh = False
+            try:
+                heartbeat_age = max(0.0, time.time() - float(heartbeat))
+                heartbeat_fresh = heartbeat_age <= HEARTBEAT_STALE_SECONDS
+            except (TypeError, ValueError):
+                heartbeat_age = None
+
+            has_version = bool(version) and not version.startswith("EXTSTATE")
+            available = has_version and (heartbeat_fresh or state == "exporting")
+            if available:
+                error = ""
+            elif has_version and heartbeat:
+                age = f"{heartbeat_age:.1f}" if heartbeat_age is not None else "unknown"
+                error = f"Capsule Transfer Bridge 心跳已停止（{age} 秒未更新），请在设置中重新安装 / 启动 Bridge。"
+            elif has_version:
+                error = "REAPER 已连接，但 Capsule Transfer Bridge 没有心跳，请重新安装 / 启动 Bridge。"
+            else:
+                error = "REAPER 已连接，但 Capsule Transfer Bridge 尚未运行。"
             return BridgeStatus(
                 webui_available=True,
                 bridge_available=available,
                 bridge_version=version if available else "",
                 status=state,
-                error="" if available else "REAPER 已连接，但 Capsule Transfer Bridge 尚未运行。",
+                error=error,
                 export_phase=phase,
                 last_result_debug=last_result,
+                heartbeat=heartbeat,
+                heartbeat_age_seconds=heartbeat_age,
+                bridge_protocol=bridge_protocol,
             )
         except Exception as exc:
             return BridgeStatus(True, False, error=f"Bridge 状态读取失败: {exc}")
 
+    @staticmethod
+    def _transport_keys(status: BridgeStatus) -> tuple[str, str]:
+        if status.bridge_protocol >= 2:
+            return "command_v2", "result_v2"
+        return "command", "result"
+
     def ping(self) -> Dict[str, Any]:
+        status = self.status()
+        if not status.webui_available:
+            raise ReaperBridgeError(status.error)
+        if not status.bridge_available:
+            raise ReaperBridgeError(status.error or "Capsule Transfer Bridge 尚未运行。")
+
         request_id = str(uuid.uuid4())
-        self.set_extstate("result", "")
-        self.set_extstate("command", json.dumps({"type": "ping", "request_id": request_id}, ensure_ascii=False))
-        return self._wait_for_result(request_id, timeout=5)
+        command_key, result_key = self._transport_keys(status)
+        self.set_extstate(result_key, "")
+        self.set_extstate("export_phase", "python sending ping")
+        self.set_extstate("last_command_debug", json.dumps({"type": "ping", "request_id": request_id}, ensure_ascii=False))
+        self.set_extstate(command_key, json.dumps({"type": "ping", "request_id": request_id}, ensure_ascii=False))
+        return self._wait_for_result(request_id, timeout=5, result_key=result_key)
 
     def _build_export_command(self, project_name: str, theme_name: str, render_preview: bool, capsule_type: str, export_dir: Optional[str], username: Optional[str]) -> Dict[str, Any]:
         pm = PathManager.get_instance()
@@ -166,21 +215,24 @@ class ReaperBridgeClient:
             raise ReaperBridgeError(status.error)
         if not status.bridge_available:
             raise ReaperBridgeError(status.error or "Capsule Transfer Bridge 尚未运行。")
+        if status.status == "exporting":
+            raise ReaperBridgeError("Capsule Transfer Bridge 正在处理另一个导出，请等待完成后再试。")
 
         command = self._build_export_command(project_name, theme_name, render_preview, capsule_type, export_dir, username)
         request_id = command["request_id"]
-        self.set_extstate("result", "")
+        command_key, result_key = self._transport_keys(status)
+        self.set_extstate(result_key, "")
         self.set_extstate("last_result_debug", "")
         self.set_extstate("export_phase", "python sending command")
         self.set_extstate("last_command_debug", json.dumps(command, ensure_ascii=False))
-        self.set_extstate("command", json.dumps(command, ensure_ascii=False))
-        result = self._wait_for_result(request_id, timeout=timeout)
+        self.set_extstate(command_key, json.dumps(command, ensure_ascii=False))
+        result = self._wait_for_result(request_id, timeout=timeout, result_key=result_key)
         result.setdefault("mode", "bridge")
         return result
 
     def _diagnostics(self) -> str:
         fields = {}
-        for key in ["bridge_version", "status", "export_phase", "command", "last_command_debug", "last_result_debug", "result"]:
+        for key in ["bridge_version_v2", "bridge_version", "status", "heartbeat_v2", "heartbeat", "export_phase", "command_v2", "command", "last_command_debug", "last_result_debug", "result_v2", "result"]:
             try:
                 value = self.get_extstate(key)
             except Exception as exc:
@@ -190,11 +242,11 @@ class ReaperBridgeClient:
             fields[key] = value
         return json.dumps(fields, ensure_ascii=False)
 
-    def _wait_for_result(self, request_id: str, timeout: int) -> Dict[str, Any]:
+    def _wait_for_result(self, request_id: str, timeout: int, result_key: str = "result") -> Dict[str, Any]:
         start = time.time()
         last_raw = ""
         while time.time() - start < timeout:
-            raw = self.get_extstate("result")
+            raw = self.get_extstate(result_key)
             if raw and raw != last_raw:
                 last_raw = raw
                 try:
@@ -210,7 +262,8 @@ class ReaperBridgeClient:
 
 def quick_bridge_export(project_name: str, theme_name: str, render_preview: bool = True, webui_port: int = 9000, capsule_type: str = "magic", export_dir: Optional[str] = None, username: Optional[str] = None) -> Dict[str, Any]:
     client = ReaperBridgeClient(port=webui_port)
-    return client.export_capsule(project_name=project_name, theme_name=theme_name, render_preview=render_preview, capsule_type=capsule_type, export_dir=export_dir, username=username)
+    timeout = PREVIEW_BRIDGE_TIMEOUT_SECONDS if render_preview else BRIDGE_TIMEOUT_SECONDS
+    return client.export_capsule(project_name=project_name, theme_name=theme_name, render_preview=render_preview, capsule_type=capsule_type, export_dir=export_dir, username=username, timeout=timeout)
 
 
 def get_bridge_status(webui_port: int = 9000) -> Dict[str, Any]:

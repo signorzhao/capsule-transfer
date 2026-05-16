@@ -481,6 +481,9 @@ def webui_export():
             "mode": result.get("mode", "bridge"),
             "needs_bridge_install": bool(result.get("needs_bridge_install")),
             "webui_required": bool(result.get("webui_required")),
+            "diagnostics": result.get("diagnostics") or result.get("bridge_diagnostics") or "",
+            "export_phase": result.get("export_phase") or "",
+            "bridge_status": result.get("bridge_status") or {},
         }
         return jsonify({"success": False, "error": result.get("error", "Reaper 导出失败"), "data": error_payload}), 500
 

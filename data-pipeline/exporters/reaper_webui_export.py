@@ -146,7 +146,7 @@ class ReaperWebUIExporter:
             username = "user"
 
         try:
-            from exporters.reaper_bridge_client import ReaperBridgeError, quick_bridge_export
+            from exporters.reaper_bridge_client import ReaperBridgeClient, ReaperBridgeError, quick_bridge_export
 
             result = quick_bridge_export(
                 project_name=project_name,
@@ -162,12 +162,23 @@ class ReaperWebUIExporter:
             return result
         except Exception as exc:
             error = str(exc)
+            diagnostics = ""
+            bridge_status: Dict[str, Any] = {}
+            try:
+                client = ReaperBridgeClient(port=self.port)
+                bridge_status = client.status().as_dict()
+                diagnostics = client._diagnostics()
+            except Exception:
+                pass
             return {
                 "success": False,
                 "mode": "bridge",
                 "needs_bridge_install": "Bridge 尚未运行" in error or "尚未运行" in error,
                 "webui_required": "Web Interface" in error or "无法连接" in error,
                 "error": error,
+                "diagnostics": diagnostics,
+                "bridge_status": bridge_status,
+                "export_phase": bridge_status.get("export_phase", ""),
             }
 
 

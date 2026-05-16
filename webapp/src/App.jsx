@@ -143,12 +143,15 @@ function Shell() {
 
   const handleCreateCapsule = async (payload) => {
     setCaptureStatus({ phase: 'exporting', message: '正在连接 REAPER Bridge…' });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), payload?.render_preview ? 150000 : 60000);
     try {
       setCaptureStatus({ phase: 'exporting', message: '正在后台导出选中的 Items，REAPER 可保持最小化。' });
       const resp = await fetch(`${api.base}/capsules/webui-export`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       });
       const body = await resp.json().catch(() => ({ success: false, error: `HTTP ${resp.status}` }));
       if (!resp.ok || !body.success) {
@@ -156,6 +159,8 @@ function Shell() {
         let message = body.error || `HTTP ${resp.status}`;
         if (flags.needs_bridge_install) message = `${message}\n\n请到“设置 / 信息”安装 REAPER Bridge。`;
         if (flags.webui_required) message = `${message}\n\n请确认 REAPER 已打开并启用 Web Interface（默认端口 9000）。`;
+        if (flags.export_phase) message = `${message}\n\nBridge 阶段：${flags.export_phase}`;
+        if (flags.diagnostics) message = `${message}\n\n诊断：${flags.diagnostics}`;
         throw new Error(message);
       }
 
@@ -170,8 +175,13 @@ function Shell() {
       }
       refreshAll();
     } catch (e) {
-      setCaptureStatus({ phase: 'error', message: e.message });
-      toast.error(`REAPER 捕获失败：${e.message}`);
+      const message = e.name === 'AbortError'
+        ? '等待 REAPER Bridge 超过 60 秒，请到“设置 / 信息”重新检测或重新启动 Bridge。'
+        : e.message;
+      setCaptureStatus({ phase: 'error', message });
+      toast.error(`REAPER 捕获失败：${message}`);
+    } finally {
+      clearTimeout(timeoutId);
     }
   };
 
