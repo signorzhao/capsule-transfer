@@ -51,6 +51,18 @@ function formatDate(s) {
   }
 }
 
+function ReaperIcon({ size = 16, className = '' }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" className={className} aria-hidden="true">
+      <circle cx="12" cy="12" r="9.2" fill="none" stroke="currentColor" strokeWidth="2.2" />
+      <circle cx="12" cy="12" r="4.1" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M4.8 8.4C8.2 7 12.2 7.5 15 9.8" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M13.7 12.8l6.1 4.4" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" />
+      <circle cx="12" cy="12" r="1.25" fill="currentColor" />
+    </svg>
+  );
+}
+
 function Shell() {
   const toast = useToast();
   const [activeTab, setActiveTab] = useState('library');
@@ -361,6 +373,15 @@ function Shell() {
     }
   };
 
+  const handleOpenFolder = async (cap) => {
+    try {
+      await api.openFolder(cap.id);
+      toast.success('已打开胶囊文件夹');
+    } catch (e) {
+      toast.error(`打开文件夹失败：${e.message}`);
+    }
+  };
+
   const onlineContacts = useMemo(() => contacts.filter((c) => c.last_seen && Date.now() - new Date(`${c.last_seen}Z`).getTime() < 5 * 60 * 1000), [contacts]);
   const myInfoLine = networkInfo ? `${networkInfo.hostname} · ${networkInfo.ip}:${networkInfo.port}` : '正在探测本机网络…';
 
@@ -390,7 +411,7 @@ function Shell() {
         </header>
 
         <main className="flex-1 overflow-y-auto p-6 custom-scrollbar">
-          {activeTab === 'library' && <LibraryView capsules={capsules} onSend={handleSelectCapsuleForSend} onDelete={handleDeleteCapsule} onUpload={handleUploadBundle} onCreate={handleCreateCapsule} onRename={handleRenameCapsule} onOpenRpp={handleOpenRpp} />}
+          {activeTab === 'library' && <LibraryView capsules={capsules} onSend={handleSelectCapsuleForSend} onDelete={handleDeleteCapsule} onUpload={handleUploadBundle} onCreate={handleCreateCapsule} onRename={handleRenameCapsule} onOpenRpp={handleOpenRpp} onOpenFolder={handleOpenFolder} />}
           {activeTab === 'contacts' && <ContactsView contacts={contacts} onlineContacts={onlineContacts} onSend={handleStartTransferTo} onDelete={handleDeleteContact} onPing={handlePingContact} showAddForm={showAddContact} setShowAddForm={setShowAddContact} onAdd={handleAddContact} />}
           {activeTab === 'transfer' && <TransferView capsules={capsules} contacts={contacts} selectedCapsules={selectedCapsules} setSelectedCapsules={setSelectedCapsules} targetContacts={targetContacts} setTargetContacts={setTargetContacts} tempPeer={tempPeer} setTempPeer={setTempPeer} showTempPeerForm={showTempPeerForm} setShowTempPeerForm={setShowTempPeerForm} isSending={isSending} onSend={handleSend} />}
           {activeTab === 'settings' && <SettingsView networkInfo={networkInfo} apiBase={api.base} />}
@@ -401,7 +422,7 @@ function Shell() {
   );
 }
 
-function LibraryView({ capsules, onSend, onDelete, onUpload, onCreate, onRename, onOpenRpp }) {
+function LibraryView({ capsules, onSend, onDelete, onUpload, onCreate, onRename, onOpenRpp, onOpenFolder }) {
   const inputRef = useRef(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [playingId, setPlayingId] = useState(null);
@@ -451,7 +472,8 @@ function LibraryView({ capsules, onSend, onDelete, onUpload, onCreate, onRename,
                 <div className="text-xs text-slate-500 mt-1 flex space-x-3"><span>{formatDate(cap.created_at)}</span><span>{formatBytes(cap.size_bytes)}</span>{cap.source_peer && <span className="text-emerald-500/80">来自 {cap.source_peer}</span>}</div>
               </div>
               <button onClick={() => startRename(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-indigo-400"><Pencil size={15} /></button>
-              <button onClick={() => onOpenRpp(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-amber-400"><FolderOpen size={16} /></button>
+              <button title="打开 RPP 工程" onClick={() => onOpenRpp(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-orange-400"><ReaperIcon size={16} /></button>
+              <button title="打开胶囊文件夹" onClick={() => onOpenFolder(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-amber-400"><FolderOpen size={16} /></button>
               <button onClick={() => onSend(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 bg-indigo-600/10 text-indigo-400 rounded-lg hover:bg-indigo-600 hover:text-white"><Send size={16} /></button>
               <button onClick={() => onDelete(cap)} className="opacity-0 group-hover:opacity-100 p-2 text-slate-500 hover:text-red-400"><Trash2 size={16} /></button>
             </div>

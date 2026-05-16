@@ -146,6 +146,35 @@ def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
 
+def _ps_single_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _windows_raise_window(titles: list[str], delay_ms: int = 500, attempts: int = 12):
+    if platform.system() != "Windows":
+        return
+    title_expr = "@(" + ",".join(_ps_single_quote(t) for t in titles if t) + ")"
+    if title_expr == "@()":
+        return
+    script = (
+        f"Start-Sleep -Milliseconds {int(delay_ms)}; "
+        "$wshell = New-Object -ComObject WScript.Shell; "
+        f"$titles = {title_expr}; "
+        f"for ($i = 0; $i -lt {int(attempts)}; $i++) {{ "
+        "foreach ($title in $titles) { "
+        "if ($wshell.AppActivate($title)) { exit 0 } "
+        "} "
+        "Start-Sleep -Milliseconds 250 "
+        "}"
+    )
+    subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command", script],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
 # Bridge routes: status + one-time install. Registered early so the frontend can
 # diagnose REAPER before any capture attempt.
 try:
@@ -423,24 +452,35 @@ def open_capsule_rpp(cap_id: str):
             subprocess.Popen(["open", str(rpp_path)])
         elif platform.system() == "Windows":
             os.startfile(str(rpp_path))
-            subprocess.Popen(
-                [
-                    "powershell.exe",
-                    "-NoProfile",
-                    "-Command",
-                    "Start-Sleep -Milliseconds 500; "
-                    "$wshell = New-Object -ComObject WScript.Shell; "
-                    "$null = $wshell.AppActivate('REAPER')",
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+            _windows_raise_window(["REAPER", rpp_path.stem], delay_ms=700, attempts=16)
         else:
             subprocess.Popen(["xdg-open", str(rpp_path)])
     except Exception as e:
         return _err(f"打开 RPP 失败: {e}", 500)
     return _ok({"rpp": str(rpp_path), "message": "已打开"})
+
+
+@app.route("/api/capsules/<cap_id>/open-folder", methods=["POST"])
+def open_capsule_folder(cap_id: str):
+    target = get_capsule_dir_by_id(cap_id)
+    if not target:
+        return _err("胶囊不存在", 404)
+    try:
+        if platform.system() == "Darwin":
+            subprocess.Popen(["open", str(target)])
+        elif platform.system() == "Windows":
+            subprocess.Popen(
+                ["explorer.exe", str(target)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            _windows_raise_window([target.name, str(target), "File Explorer", "资源管理器"], delay_ms=350, attempts=16)
+        else:
+            subprocess.Popen(["xdg-open", str(target)])
+    except Exception as e:
+        return _err(f"打开胶囊文件夹失败: {e}", 500)
+    return _ok({"folder": str(target), "message": "已打开"})
 
 
 @app.route("/api/capsules/<cap_id>/bundle", methods=["GET"])

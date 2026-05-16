@@ -32,6 +32,7 @@ export const api = {
     jsonFetch(`/capsules/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   previewUrl: (id) => `${API_BASE}/capsules/${id}/preview`,
   openRpp: (id) => jsonFetch(`/capsules/${id}/open-rpp`, { method: 'POST' }),
+  openFolder: (id) => jsonFetch(`/capsules/${id}/open-folder`, { method: 'POST' }),
 
   listContacts: () => jsonFetch('/contacts'),
   addContact: (payload) =>
