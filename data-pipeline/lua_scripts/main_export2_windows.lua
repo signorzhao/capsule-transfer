@@ -90,8 +90,82 @@ local function RunCommandHidden(command, timeoutMs)
     return os.execute(command)
 end
 
+local MakeDir
+
+local function PathExists(path)
+    if not path or path == "" then
+        return false
+    end
+    local f = io.open(path, "rb")
+    if f then
+        f:close()
+        return true
+    end
+    return false
+end
+
+local function QuoteWindowsArg(value)
+    return '"' .. tostring(value or ""):gsub('"', '""') .. '"'
+end
+
+local function WriteTempWindowsRenderHelper(helperDir)
+    if not helperDir or helperDir == "" then
+        return nil
+    end
+    MakeDir(helperDir)
+    local helperPath = JoinPath(helperDir, "_capsule_render_background_" .. tostring(os.time()) .. ".vbs")
+    local f = io.open(helperPath, "w")
+    if not f then
+        return nil
+    end
+    f:write([[Option Explicit
+
+Dim shell, reaperExe, rppPath, cmd
+
+If WScript.Arguments.Count < 2 Then
+  WScript.Quit 2
+End If
+
+Set shell = CreateObject("WScript.Shell")
+reaperExe = WScript.Arguments.Item(0)
+rppPath = WScript.Arguments.Item(1)
+shell.Environment("PROCESS")("CAPSULE_TRANSFER_BRIDGE_DISABLED") = "1"
+
+cmd = """" & reaperExe & """ -renderproject """ & rppPath & """ -nosplash -ignoreerrors -close"
+
+WScript.Quit shell.Run(cmd, 7, True)
+]])
+    f:close()
+    return helperPath
+end
+
+local function RunWindowsBackgroundRender(reaperPath, rppPath, helperDir, timeoutMs)
+    local winRppPath = tostring(rppPath or ""):gsub("/", "\\")
+    local helperPath = WriteTempWindowsRenderHelper(helperDir)
+    if helperPath and PathExists(helperPath) then
+        local renderCmd = string.format(
+            'wscript.exe //B //Nologo %s %s %s',
+            QuoteWindowsArg(helperPath),
+            QuoteWindowsArg(reaperPath),
+            QuoteWindowsArg(winRppPath)
+        )
+        reaper.ShowConsoleMsg("渲染命令: " .. renderCmd .. "\n")
+        local result = RunCommandHidden(renderCmd, timeoutMs or 190000)
+        os.remove(helperPath)
+        return result
+    end
+
+    local fallbackCmd = string.format(
+        '%s -renderproject %s -nosplash -ignoreerrors -close',
+        QuoteWindowsArg(reaperPath),
+        QuoteWindowsArg(winRppPath)
+    )
+    reaper.ShowConsoleMsg("渲染命令 fallback: " .. fallbackCmd .. "\n")
+    return RunCommandHidden(fallbackCmd, timeoutMs or 190000)
+end
+
 -- 跨平台创建目录（递归创建）
-local function MakeDir(path)
+function MakeDir(path)
     if not path or path == "" then
         return false
     end
@@ -2665,21 +2739,20 @@ function RenderPreviewAudioFromRPP(rppPath, outputPath, startTime, endTime)
     -- 构建渲染命令（添加 -nosplash -ignoreerrors -nonewinst 参数，Windows 用 start /B 后台运行）
     local renderCmd
     if IsWindows() then
-        local helperPath = JoinPath(GetCurrentScriptDir(), "..", "scripts", "render_background_windows.vbs")
-        renderCmd = string.format(
-            'wscript.exe //B //Nologo "%s" "%s" "%s"',
-            helperPath,
-            reaperPath,
-            rppPath
-        )
+        renderCmd = nil
     else
         renderCmd = string.format('"%s" -renderproject "%s" -nosplash -ignoreerrors', reaperPath, rppPath)
     end
     reaper.ShowConsoleMsg("  执行渲染命令:\n")
-    reaper.ShowConsoleMsg("    " .. renderCmd .. "\n")
+    reaper.ShowConsoleMsg("    " .. tostring(renderCmd or "windows temporary helper") .. "\n")
 
     -- 执行命令行渲染
-    local result = RunCommandHidden(renderCmd, 190000)
+    local result
+    if IsWindows() then
+        result = RunWindowsBackgroundRender(reaperPath, rppPath, GetDirectoryPath(outputPath), 190000)
+    else
+        result = RunCommandHidden(renderCmd, 190000)
+    end
     reaper.ShowConsoleMsg("  渲染命令返回码: " .. tostring(result) .. "\n")
 
     -- 等待文件写入完成
@@ -3067,19 +3140,10 @@ function ExportCapsule()
         end
 
         if reaperPath then
-            local winRppPath = rppPath:gsub("/", "\\")
             -- Render through a Windows helper that launches a separate minimized
             -- REAPER process and restores the user's foreground window, matching
             -- the macOS focus-safe render helper behavior.
-            local helperPath = JoinPath(GetCurrentScriptDir(), "..", "scripts", "render_background_windows.vbs")
-            local renderCmd = string.format(
-                'wscript.exe //B //Nologo "%s" "%s" "%s"',
-                helperPath,
-                reaperPath,
-                winRppPath
-            )
-            reaper.ShowConsoleMsg("渲染命令: " .. renderCmd .. "\n")
-            RunCommandHidden(renderCmd, 190000)
+            RunWindowsBackgroundRender(reaperPath, rppPath, outputDir, 190000)
             reaper.ShowConsoleMsg("✓ 渲染已在后台启动\n")
             BridgePhase("rendering preview: finished")
         else
