@@ -9,6 +9,20 @@ use std::path::PathBuf;
 struct BackendProcess(Mutex<Option<Child>>);
 
 fn find_backend_exe(app: &tauri::App) -> Option<PathBuf> {
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let candidates = [
+                exe_dir.join("flask-backend.exe"),
+                exe_dir.join("flask-backend"),
+            ];
+            for p in &candidates {
+                if p.exists() {
+                    return Some(p.clone());
+                }
+            }
+        }
+    }
+
     if let Ok(resource_dir) = app.path().resource_dir() {
         let candidates = [
             resource_dir.join("binaries").join("flask-backend.exe"),
@@ -19,19 +33,6 @@ fn find_backend_exe(app: &tauri::App) -> Option<PathBuf> {
         for p in &candidates {
             if p.exists() {
                 return Some(p.clone());
-            }
-        }
-    }
-
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let p = exe_dir.join("flask-backend.exe");
-            if p.exists() {
-                return Some(p);
-            }
-            let p = exe_dir.join("flask-backend");
-            if p.exists() {
-                return Some(p);
             }
         }
     }
