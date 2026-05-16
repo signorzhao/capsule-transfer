@@ -20,7 +20,7 @@ import requests
 from common import PathManager
 
 SECTION = "capsule_transfer"
-BRIDGE_TIMEOUT_SECONDS = 180
+BRIDGE_TIMEOUT_SECONDS = 45
 POLL_INTERVAL_SECONDS = 0.2
 
 
@@ -32,7 +32,6 @@ def sanitize_path_for_lua(path: str) -> str:
     """Convert a filesystem path to a Lua-friendly absolute path string."""
     if not path:
         return ""
-
     is_absolute = Path(path).is_absolute()
     if not is_absolute and len(path) >= 2 and path[1] == ":":
         is_absolute = True
@@ -42,17 +41,9 @@ def sanitize_path_for_lua(path: str) -> str:
 
 
 def parse_extstate_reply(text: str, section: str, key: str) -> str:
-    """Extract value from REAPER Web Interface GET/EXTSTATE response.
-
-    REAPER can return either a raw value or a line like:
-      EXTSTATE capsule_transfer install_result {json...}
-    Empty values often come back as just:
-      EXTSTATE capsule_transfer install_result
-    """
     raw = (text or "").strip()
     if not raw:
         return ""
-
     prefix = f"EXTSTATE {section} {key}"
     for line in raw.splitlines():
         line = line.strip()
@@ -60,8 +51,6 @@ def parse_extstate_reply(text: str, section: str, key: str) -> str:
             return ""
         if line.startswith(prefix + " "):
             return unquote(line[len(prefix) + 1:].strip())
-
-    # Some builds return percent-encoded raw value only.
     return unquote(raw)
 
 
@@ -72,6 +61,8 @@ class BridgeStatus:
     bridge_version: str = ""
     status: str = "unknown"
     error: str = ""
+    export_phase: str = ""
+    last_result_debug: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -80,6 +71,8 @@ class BridgeStatus:
             "bridge_version": self.bridge_version,
             "status": self.status,
             "error": self.error,
+            "export_phase": self.export_phase,
+            "last_result_debug": self.last_result_debug,
         }
 
 
@@ -123,14 +116,12 @@ class ReaperBridgeClient:
 
     def status(self) -> BridgeStatus:
         if not self.test_webui():
-            return BridgeStatus(
-                webui_available=False,
-                bridge_available=False,
-                error="无法连接 REAPER Web Interface，请确认 REAPER 已打开并启用 Web Interface。",
-            )
+            return BridgeStatus(False, False, error="无法连接 REAPER Web Interface，请确认 REAPER 已打开并启用 Web Interface。")
         try:
             version = self.get_extstate("bridge_version")
             state = self.get_extstate("status") or "unknown"
+            phase = self.get_extstate("export_phase")
+            last_result = self.get_extstate("last_result_debug")
             available = bool(version) and not version.startswith("EXTSTATE ")
             return BridgeStatus(
                 webui_available=True,
@@ -138,13 +129,11 @@ class ReaperBridgeClient:
                 bridge_version=version if available else "",
                 status=state,
                 error="" if available else "REAPER 已连接，但 Capsule Transfer Bridge 尚未运行。",
+                export_phase=phase,
+                last_result_debug=last_result,
             )
         except Exception as exc:
-            return BridgeStatus(
-                webui_available=True,
-                bridge_available=False,
-                error=f"Bridge 状态读取失败: {exc}",
-            )
+            return BridgeStatus(True, False, error=f"Bridge 状态读取失败: {exc}")
 
     def ping(self) -> Dict[str, Any]:
         request_id = str(uuid.uuid4())
@@ -152,19 +141,10 @@ class ReaperBridgeClient:
         self.set_extstate("command", json.dumps({"type": "ping", "request_id": request_id}, ensure_ascii=False))
         return self._wait_for_result(request_id, timeout=5)
 
-    def _build_export_command(
-        self,
-        project_name: str,
-        theme_name: str,
-        render_preview: bool,
-        capsule_type: str,
-        export_dir: Optional[str],
-        username: Optional[str],
-    ) -> Dict[str, Any]:
+    def _build_export_command(self, project_name: str, theme_name: str, render_preview: bool, capsule_type: str, export_dir: Optional[str], username: Optional[str]) -> Dict[str, Any]:
         pm = PathManager.get_instance()
         main_export = pm.get_lua_script("main_export2.lua")
         main_export_windows = pm.get_lua_script("main_export2_windows.lua")
-
         command: Dict[str, Any] = {
             "type": "export_capsule",
             "request_id": str(uuid.uuid4()),
@@ -180,36 +160,35 @@ class ReaperBridgeClient:
             command["export_dir"] = sanitize_path_for_lua(export_dir)
         return command
 
-    def export_capsule(
-        self,
-        project_name: str,
-        theme_name: str,
-        render_preview: bool = True,
-        capsule_type: str = "magic",
-        export_dir: Optional[str] = None,
-        username: Optional[str] = None,
-        timeout: int = BRIDGE_TIMEOUT_SECONDS,
-    ) -> Dict[str, Any]:
+    def export_capsule(self, project_name: str, theme_name: str, render_preview: bool = True, capsule_type: str = "magic", export_dir: Optional[str] = None, username: Optional[str] = None, timeout: int = BRIDGE_TIMEOUT_SECONDS) -> Dict[str, Any]:
         status = self.status()
         if not status.webui_available:
             raise ReaperBridgeError(status.error)
         if not status.bridge_available:
             raise ReaperBridgeError(status.error or "Capsule Transfer Bridge 尚未运行。")
 
-        command = self._build_export_command(
-            project_name=project_name,
-            theme_name=theme_name,
-            render_preview=render_preview,
-            capsule_type=capsule_type,
-            export_dir=export_dir,
-            username=username,
-        )
+        command = self._build_export_command(project_name, theme_name, render_preview, capsule_type, export_dir, username)
         request_id = command["request_id"]
         self.set_extstate("result", "")
+        self.set_extstate("last_result_debug", "")
+        self.set_extstate("export_phase", "python sending command")
+        self.set_extstate("last_command_debug", json.dumps(command, ensure_ascii=False))
         self.set_extstate("command", json.dumps(command, ensure_ascii=False))
         result = self._wait_for_result(request_id, timeout=timeout)
         result.setdefault("mode", "bridge")
         return result
+
+    def _diagnostics(self) -> str:
+        fields = {}
+        for key in ["bridge_version", "status", "export_phase", "command", "last_command_debug", "last_result_debug", "result"]:
+            try:
+                value = self.get_extstate(key)
+            except Exception as exc:
+                value = f"<read error: {exc}>"
+            if value and len(value) > 600:
+                value = value[:600] + "..."
+            fields[key] = value
+        return json.dumps(fields, ensure_ascii=False)
 
     def _wait_for_result(self, request_id: str, timeout: int) -> Dict[str, Any]:
         start = time.time()
@@ -226,27 +205,12 @@ class ReaperBridgeClient:
                 if data.get("request_id") == request_id:
                     return data
             time.sleep(POLL_INTERVAL_SECONDS)
-        raise ReaperBridgeError(f"等待 REAPER bridge 导出超时 ({timeout} 秒)")
+        raise ReaperBridgeError(f"等待 REAPER bridge 导出超时 ({timeout} 秒)。诊断: {self._diagnostics()}")
 
 
-def quick_bridge_export(
-    project_name: str,
-    theme_name: str,
-    render_preview: bool = True,
-    webui_port: int = 9000,
-    capsule_type: str = "magic",
-    export_dir: Optional[str] = None,
-    username: Optional[str] = None,
-) -> Dict[str, Any]:
+def quick_bridge_export(project_name: str, theme_name: str, render_preview: bool = True, webui_port: int = 9000, capsule_type: str = "magic", export_dir: Optional[str] = None, username: Optional[str] = None) -> Dict[str, Any]:
     client = ReaperBridgeClient(port=webui_port)
-    return client.export_capsule(
-        project_name=project_name,
-        theme_name=theme_name,
-        render_preview=render_preview,
-        capsule_type=capsule_type,
-        export_dir=export_dir,
-        username=username,
-    )
+    return client.export_capsule(project_name=project_name, theme_name=theme_name, render_preview=render_preview, capsule_type=capsule_type, export_dir=export_dir, username=username)
 
 
 def get_bridge_status(webui_port: int = 9000) -> Dict[str, Any]:
