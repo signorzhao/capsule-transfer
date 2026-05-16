@@ -50,6 +50,20 @@ function formatDate(s) {
   }
 }
 
+function parseHostPort(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return { ip: '', port: '' };
+  const normalized = raw.replace(/^https?:\/\//i, '');
+  const firstPart = normalized.split(/[/?#]/)[0];
+  const match = firstPart.match(/^(.+):(\d{1,5})$/);
+  if (!match) return { ip: raw, port: '' };
+  const portNumber = Number(match[2]);
+  if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
+    return { ip: raw, port: '' };
+  }
+  return { ip: match[1].replace(/^\[|\]$/g, ''), port: String(portNumber) };
+}
+
 function ReaperIcon({ size = 16, className = '' }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" className={className} aria-hidden="true">
@@ -496,8 +510,12 @@ function ContactsView({ contacts, onlineContacts, onSend, onDelete, onPing, show
 }
 
 function AddContactForm({ onCancel, onSubmit }) {
-  const [form, setForm] = useState({ name: '', ip: '', port: '5005', note: '' });
-  return <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-5 mb-6"><h3 className="text-sm font-bold text-slate-200 mb-4">添加联系人</h3><div className="grid grid-cols-1 md:grid-cols-2 gap-3"><FormField label="名称"><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></FormField><FormField label="IP"><input value={form.ip} onChange={(e) => setForm({ ...form, ip: e.target.value })} /></FormField><FormField label="端口"><input value={form.port} onChange={(e) => setForm({ ...form, port: e.target.value })} /></FormField><FormField label="备注"><input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></FormField></div><div className="flex justify-end space-x-2 mt-5"><button onClick={onCancel} className="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button><button onClick={() => form.name && form.ip && onSubmit({ ...form, port: Number(form.port) || 5005 })} className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg">保存</button></div></div>;
+  const [form, setForm] = useState({ name: '', ip: '', port: '', note: '' });
+  const updateIp = (value) => {
+    const parsed = parseHostPort(value);
+    setForm((prev) => ({ ...prev, ip: parsed.ip, port: parsed.port || prev.port }));
+  };
+  return <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-5 mb-6"><h3 className="text-sm font-bold text-slate-200 mb-4">添加联系人</h3><div className="grid grid-cols-1 md:grid-cols-2 gap-3"><FormField label="名称"><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></FormField><FormField label="IP"><input value={form.ip} placeholder="可粘贴 IP:端口" onChange={(e) => updateIp(e.target.value)} /></FormField><FormField label="端口"><input value={form.port} placeholder="默认 5005" onChange={(e) => setForm({ ...form, port: e.target.value.replace(/\D/g, '').slice(0, 5) })} /></FormField><FormField label="备注"><input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></FormField></div><div className="flex justify-end space-x-2 mt-5"><button onClick={onCancel} className="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button><button onClick={() => form.name && form.ip && onSubmit({ ...form, port: Number(form.port) || 5005 })} className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg">保存</button></div></div>;
 }
 
 function FormField({ label, children }) {
