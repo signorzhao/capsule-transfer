@@ -60,6 +60,34 @@ def _normalize_windows_reaper_path(path: str) -> Path:
     return p.resolve()
 
 
+def _ps_single_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _windows_restore_capsule_window(delay_ms: int = 250, attempts: int = 12):
+    if platform.system() != "Windows":
+        return
+    titles = ["CapsuleTransfer", "Sound Capsule", "Sound Capsule · LAN", "localhost:3100", "127.0.0.1:5005"]
+    title_expr = "@(" + ",".join(_ps_single_quote(t) for t in titles) + ")"
+    script = (
+        f"Start-Sleep -Milliseconds {int(delay_ms)}; "
+        "$wshell = New-Object -ComObject WScript.Shell; "
+        f"$titles = {title_expr}; "
+        f"for ($i = 0; $i -lt {int(attempts)}; $i++) {{ "
+        "foreach ($title in $titles) { "
+        "if ($wshell.AppActivate($title)) { exit 0 } "
+        "} "
+        "Start-Sleep -Milliseconds 200 "
+        "}"
+    )
+    subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command", script],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
 def _run_reaper_script(reaper_exe: Path, lua_script: Path) -> tuple[bool, str]:
     system = platform.system()
     try:
@@ -74,6 +102,7 @@ def _run_reaper_script(reaper_exe: Path, lua_script: Path) -> tuple[bool, str]:
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 startupinfo=startupinfo,
             )
+            _windows_restore_capsule_window(delay_ms=200, attempts=16)
         else:
             subprocess.Popen(
                 [str(reaper_exe), "-nonewinst", str(lua_script)],
