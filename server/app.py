@@ -230,6 +230,53 @@ def _write_manifest(capsule_dir: Path, manifest: dict):
     )
 
 
+def _safe_filename_stem(name: str) -> str:
+    cleaned = "".join("_" if ch in '<>:"/\\|?*' or ord(ch) < 32 else ch for ch in name.strip())
+    cleaned = cleaned.rstrip(" .")
+    return cleaned[:120] or "capsule"
+
+
+def _unique_child_path(parent: Path, filename: str, current: Path | None = None) -> Path:
+    candidate = parent / filename
+    if current and candidate.resolve() == current.resolve():
+        return candidate
+    if not candidate.exists():
+        return candidate
+    stem = candidate.stem
+    suffix = candidate.suffix
+    for idx in range(2, 1000):
+        candidate = parent / f"{stem}_{idx}{suffix}"
+        if current and candidate.resolve() == current.resolve():
+            return candidate
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError("无法生成唯一的文件名")
+
+
+def _find_capsule_rpp(capsule_dir: Path, manifest: dict | None = None) -> Path | None:
+    cap = (manifest or {}).get("capsule") or {}
+    if cap.get("rpp_file"):
+        rpp_path = capsule_dir / cap["rpp_file"]
+        if rpp_path.exists():
+            return rpp_path
+    rpps = sorted(capsule_dir.glob("*.rpp"))
+    return rpps[0] if rpps else None
+
+
+def _update_metadata_file(capsule_dir: Path, name: str, rpp_file: str | None = None):
+    meta_path = capsule_dir / "metadata.json"
+    if not meta_path.exists():
+        return
+    try:
+        meta = json.loads(meta_path.read_text("utf-8"))
+    except Exception:
+        return
+    meta["name"] = name
+    if rpp_file:
+        meta["rpp_file"] = rpp_file
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _dir_size(d: Path) -> int:
     return sum(p.stat().st_size for p in d.rglob("*") if p.is_file())
 
@@ -424,7 +471,23 @@ def update_capsule(cap_id: str):
     data = request.get_json(silent=True) or {}
     new_name = data.get("name")
     if new_name and new_name.strip():
-        manifest.setdefault("capsule", {})["name"] = new_name.strip()
+        clean_name = new_name.strip()
+        safe_stem = _safe_filename_stem(clean_name)
+        cap = manifest.setdefault("capsule", {})
+        rpp_path = _find_capsule_rpp(target, manifest)
+        new_rpp_name = None
+        if rpp_path:
+            try:
+                new_rpp_path = _unique_child_path(target, f"{safe_stem}.rpp", current=rpp_path)
+                if new_rpp_path.resolve() != rpp_path.resolve():
+                    rpp_path.rename(new_rpp_path)
+                new_rpp_name = new_rpp_path.name
+            except Exception as e:
+                return _err(f"重命名 RPP 文件失败: {e}", 500)
+        cap["name"] = clean_name
+        if new_rpp_name:
+            cap["rpp_file"] = new_rpp_name
+        _update_metadata_file(target, clean_name, new_rpp_name)
         _write_manifest(target, manifest)
     return _ok(_capsule_from_dir(target))
 
