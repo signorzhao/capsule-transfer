@@ -1,0 +1,89 @@
+name: Build Windows Portable
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: webapp/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: server/requirements.txt
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        working-directory: webapp
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: webapp
+        run: npm run build
+
+      - name: Install Python dependencies & build sidecar
+        run: |
+          pip install -r server/requirements.txt
+          pip install pyinstaller
+          pyinstaller flask-backend.spec --noconfirm
+          New-Item -ItemType Directory -Force src-tauri/binaries
+          Copy-Item dist/flask-backend.exe src-tauri/binaries/flask-backend.exe
+
+      - name: Build Tauri app
+        run: npx --prefix webapp tauri build
+
+      - name: Assemble portable package
+        run: |
+          New-Item -ItemType Directory -Force CapsuleTransfer
+          # Tauri 编译产物
+          Copy-Item src-tauri/target/release/CapsuleTransfer.exe CapsuleTransfer/
+          # Flask 后端 sidecar
+          Copy-Item dist/flask-backend.exe CapsuleTransfer/
+          # data-pipeline
+          Copy-Item -Recurse data-pipeline CapsuleTransfer/data-pipeline
+          # 前端（Flask 需要）
+          Copy-Item -Recurse webapp/dist CapsuleTransfer/webapp
+          # 创建数据目录
+          New-Item -ItemType Directory -Force CapsuleTransfer/data/capsules
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CapsuleTransfer-Windows-Portable
+          path: CapsuleTransfer
+
+      - name: Create ZIP for Release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          Compress-Archive -Path CapsuleTransfer -DestinationPath CapsuleTransfer-Windows-Portable.zip
+
+      - name: Create Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: CapsuleTransfer-Windows-Portable.zip
+          generate_release_notes: true
