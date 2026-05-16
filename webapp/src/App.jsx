@@ -10,7 +10,6 @@ import {
   UserPlus,
   Trash2,
   Search,
-  Upload,
   RefreshCw,
   Copy,
   Play,
@@ -26,7 +25,7 @@ import {
 
 import NavIcon from './components/NavIcon.jsx';
 import { ToastProvider, useToast } from './components/Toast.jsx';
-import { api, uploadCapsuleBundle } from './api.js';
+import { api } from './api.js';
 
 function formatBytes(bytes = 0) {
   if (!bytes) return '0 B';
@@ -170,17 +169,6 @@ function Shell() {
     setTempPeer({ ip: '', port: '5005' });
     refreshAll();
     setIsSending(false);
-  };
-
-  const handleUploadBundle = async (file) => {
-    if (!file) return;
-    try {
-      const resp = await uploadCapsuleBundle(file);
-      toast.success(`已导入：${resp.data?.name || '胶囊'}`);
-      refreshAll();
-    } catch (e) {
-      toast.error(`导入失败：${e.message}`);
-    }
   };
 
   const handleCreateCapsule = async (payload) => {
@@ -410,7 +398,7 @@ function Shell() {
         </header>
 
         <main className="flex-1 overflow-y-auto p-6 custom-scrollbar">
-          {activeTab === 'library' && <LibraryView capsules={capsules} onSend={handleSelectCapsuleForSend} onDelete={handleDeleteCapsule} onUpload={handleUploadBundle} onCreate={handleCreateCapsule} onRename={handleRenameCapsule} onOpenRpp={handleOpenRpp} onOpenFolder={handleOpenFolder} />}
+          {activeTab === 'library' && <LibraryView capsules={capsules} onSend={handleSelectCapsuleForSend} onDelete={handleDeleteCapsule} onCreate={handleCreateCapsule} onRename={handleRenameCapsule} onOpenRpp={handleOpenRpp} onOpenFolder={handleOpenFolder} />}
           {activeTab === 'contacts' && <ContactsView contacts={contacts} onlineContacts={onlineContacts} onSend={handleStartTransferTo} onDelete={handleDeleteContact} onPing={handlePingContact} showAddForm={showAddContact} setShowAddForm={setShowAddContact} onAdd={handleAddContact} />}
           {activeTab === 'transfer' && <TransferView capsules={capsules} contacts={contacts} selectedCapsules={selectedCapsules} setSelectedCapsules={setSelectedCapsules} targetContacts={targetContacts} setTargetContacts={setTargetContacts} tempPeer={tempPeer} setTempPeer={setTempPeer} showTempPeerForm={showTempPeerForm} setShowTempPeerForm={setShowTempPeerForm} isSending={isSending} onSend={handleSend} />}
           {activeTab === 'settings' && <SettingsView networkInfo={networkInfo} apiBase={api.base} />}
@@ -421,8 +409,7 @@ function Shell() {
   );
 }
 
-function LibraryView({ capsules, onSend, onDelete, onUpload, onCreate, onRename, onOpenRpp, onOpenFolder }) {
-  const inputRef = useRef(null);
+function LibraryView({ capsules, onSend, onDelete, onCreate, onRename, onOpenRpp, onOpenFolder }) {
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [playingId, setPlayingId] = useState(null);
   const audioRef = useRef(null);
@@ -454,15 +441,13 @@ function LibraryView({ capsules, onSend, onDelete, onUpload, onCreate, onRename,
       <div className="flex items-center justify-between mb-8">
         <div><h1 className="text-2xl font-bold text-white">我的胶囊</h1><p className="text-slate-500 text-sm mt-1">本地已捕获 / 接收的胶囊（共 {capsules.length} 个）</p></div>
         <div className="flex items-center space-x-2">
-          <input ref={inputRef} type="file" accept=".zip" className="hidden" onChange={(e) => { onUpload(e.target.files?.[0]); e.target.value = ''; }} />
-          <button onClick={() => inputRef.current?.click()} className="border border-slate-700 hover:bg-slate-800 text-slate-300 px-4 py-2 rounded-lg flex items-center space-x-2"><Upload size={16} /><span>导入胶囊</span></button>
           <button onClick={() => setShowCreateForm((v) => !v)} className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg flex items-center space-x-2 shadow-lg shadow-indigo-600/20"><Plus size={18} /><span>新捕获</span></button>
         </div>
       </div>
 
       {showCreateForm && <CreateCapsuleForm onCancel={() => setShowCreateForm(false)} onSubmit={async (data) => { await onCreate(data); setShowCreateForm(false); }} />}
       {capsules.length === 0 && !showCreateForm ? (
-        <div className="border-2 border-dashed border-slate-800 rounded-2xl flex flex-col items-center justify-center p-16 text-slate-500"><Package size={32} className="mb-3" /><p className="text-sm">暂无胶囊。可点右上角“新捕获”从 REAPER 捕获，或“导入胶囊”加载 .capsule.zip。</p></div>
+        <div className="border-2 border-dashed border-slate-800 rounded-2xl flex flex-col items-center justify-center p-16 text-slate-500"><Package size={32} className="mb-3" /><p className="text-sm">暂无胶囊。可点右上角“新捕获”从 REAPER 捕获。</p></div>
       ) : (
         <div className="grid gap-3">
           {capsules.map((cap) => (
