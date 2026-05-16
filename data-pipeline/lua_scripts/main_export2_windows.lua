@@ -164,6 +164,43 @@ local function RunWindowsBackgroundRender(reaperPath, rppPath, helperDir, timeou
     return RunCommandHidden(fallbackCmd, timeoutMs or 190000)
 end
 
+local function RewriteRppRenderOutputToCurrentDir(rppPath, renderPattern)
+    if not rppPath or rppPath == "" then
+        return false
+    end
+    local rppDir = GetDirectoryPath(rppPath)
+    if not rppDir or rppDir == "" then
+        return false
+    end
+    local f = io.open(rppPath, "r")
+    if not f then
+        return false
+    end
+    local content = f:read("*a") or ""
+    f:close()
+
+    local normalizedDir = rppDir:gsub("\\", "/")
+    content = content:gsub("RENDER_FILE%s+[^\n\r]*[\r]?\n?", "")
+    content = content:gsub("RENDER_PATTERN%s+[^\n\r]*[\r]?\n?", "")
+    local settings = string.format("RENDER_FILE %s\nRENDER_PATTERN %s\n", normalizedDir, renderPattern or "")
+    local replaced = false
+    content = content:gsub("(<REAPER_PROJECT[^\n\r]*[\r]?\n)", function(header)
+        replaced = true
+        return header .. settings
+    end, 1)
+    if not replaced then
+        content = settings .. content
+    end
+
+    local wf = io.open(rppPath, "w")
+    if not wf then
+        return false
+    end
+    wf:write(content)
+    wf:close()
+    return true
+end
+
 -- 跨平台创建目录（递归创建）
 MakeDir = function(path)
     if not path or path == "" then
@@ -2735,6 +2772,8 @@ function RenderPreviewAudioFromRPP(rppPath, outputPath, startTime, endTime)
         reaper.ShowConsoleMsg("  修复RPP渲染设置...\n")
         FixRPPRenderSettings(rppPath, tempWavPath or outputPath, previewStartTime, previewEndTime)
     end
+    local _, renderBase = SplitOutputPath(tempWavPath or outputPath)
+    RewriteRppRenderOutputToCurrentDir(rppPath, renderBase)
 
     -- 构建渲染命令（添加 -nosplash -ignoreerrors -nonewinst 参数，Windows 用 start /B 后台运行）
     local renderCmd
@@ -3143,6 +3182,7 @@ function ExportCapsule()
             -- Render through a Windows helper that launches a separate minimized
             -- REAPER process and restores the user's foreground window, matching
             -- the macOS focus-safe render helper behavior.
+            RewriteRppRenderOutputToCurrentDir(rppPath, capsuleName)
             RunWindowsBackgroundRender(reaperPath, rppPath, outputDir, 190000)
             reaper.ShowConsoleMsg("✓ 渲染已在后台启动\n")
             BridgePhase("rendering preview: finished")
