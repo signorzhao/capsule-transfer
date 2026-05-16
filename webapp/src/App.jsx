@@ -312,7 +312,6 @@ function Shell() {
   };
 
   const handleDeleteCapsule = async (cap) => {
-    if (!window.confirm(`确认删除胶囊 "${cap.name}"？文件也会从本地删除。`)) return;
     try {
       await api.deleteCapsule(cap.id);
       toast.success('已删除');
@@ -429,6 +428,7 @@ function LibraryView({ capsules, onSend, onDelete, onUpload, onCreate, onRename,
   const audioRef = useRef(null);
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState('');
+  const [deleteConfirmId, setDeleteConfirmId] = useState(null);
 
   const handlePlay = (cap) => {
     if (playingId === cap.id) { audioRef.current?.pause(); setPlayingId(null); return; }
@@ -443,6 +443,9 @@ function LibraryView({ capsules, onSend, onDelete, onUpload, onCreate, onRename,
 
   const startRename = (cap) => { setEditingId(cap.id); setEditName(cap.name); };
   const confirmRename = (cap) => { if (editName.trim() && editName.trim() !== cap.name) onRename(cap, editName.trim()); setEditingId(null); };
+  const requestDelete = (cap) => { setDeleteConfirmId(cap.id); };
+  const cancelDelete = () => { setDeleteConfirmId(null); };
+  const confirmDelete = (cap) => { setDeleteConfirmId(null); onDelete(cap); };
 
   useEffect(() => () => audioRef.current?.pause(), []);
 
@@ -475,7 +478,14 @@ function LibraryView({ capsules, onSend, onDelete, onUpload, onCreate, onRename,
               <button title="打开 RPP 工程" onClick={() => onOpenRpp(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-orange-400"><ReaperIcon size={16} /></button>
               <button title="打开胶囊文件夹" onClick={() => onOpenFolder(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-amber-400"><FolderOpen size={16} /></button>
               <button onClick={() => onSend(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 bg-indigo-600/10 text-indigo-400 rounded-lg hover:bg-indigo-600 hover:text-white"><Send size={16} /></button>
-              <button onClick={() => onDelete(cap)} className="opacity-0 group-hover:opacity-100 p-2 text-slate-500 hover:text-red-400"><Trash2 size={16} /></button>
+              {deleteConfirmId === cap.id ? (
+                <div className="flex items-center space-x-1">
+                  <button title="确认删除" onClick={() => confirmDelete(cap)} className="p-2 bg-red-500/15 text-red-300 rounded-lg hover:bg-red-500 hover:text-white"><Check size={16} /></button>
+                  <button title="取消删除" onClick={cancelDelete} className="p-2 text-slate-500 hover:text-slate-200"><X size={16} /></button>
+                </div>
+              ) : (
+                <button title="删除胶囊" onClick={() => requestDelete(cap)} className="opacity-0 group-hover:opacity-100 p-2 text-slate-500 hover:text-red-400"><Trash2 size={16} /></button>
+              )}
             </div>
           ))}
         </div>
