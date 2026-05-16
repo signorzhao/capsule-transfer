@@ -66,6 +66,11 @@ class BridgeStatus:
     heartbeat: str = ""
     heartbeat_age_seconds: Optional[float] = None
     bridge_protocol: int = 1
+    bridge_exe_path: str = ""
+    bridge_app_version: str = ""
+    bridge_resource_path: str = ""
+    bridge_project_path: str = ""
+    selected_item_count: Optional[int] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -79,11 +84,16 @@ class BridgeStatus:
             "heartbeat": self.heartbeat,
             "heartbeat_age_seconds": self.heartbeat_age_seconds,
             "bridge_protocol": self.bridge_protocol,
+            "bridge_exe_path": self.bridge_exe_path,
+            "bridge_app_version": self.bridge_app_version,
+            "bridge_resource_path": self.bridge_resource_path,
+            "bridge_project_path": self.bridge_project_path,
+            "selected_item_count": self.selected_item_count,
         }
 
 
 class ReaperBridgeClient:
-    def __init__(self, host: str = "localhost", port: int = 9000, timeout: float = 3.0):
+    def __init__(self, host: str = "127.0.0.1", port: int = 9000, timeout: float = 3.0):
         self.host = host
         self.port = port
         self.timeout = timeout
@@ -118,7 +128,18 @@ class ReaperBridgeClient:
             raise ReaperBridgeError(f"写入 REAPER EXTSTATE 失败: HTTP {resp.status_code}")
 
     def get_extstate(self, key: str) -> str:
-        resp = self._reaper_api(self._get_extstate_command(SECTION, key))
+        last_exc = None
+        for attempt in range(3):
+            try:
+                resp = self._reaper_api(self._get_extstate_command(SECTION, key))
+                break
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 2:
+                    raise
+                time.sleep(0.15)
+        else:
+            raise last_exc or ReaperBridgeError("read REAPER EXTSTATE failed")
         if not resp.ok:
             raise ReaperBridgeError(f"读取 REAPER EXTSTATE 失败: HTTP {resp.status_code}")
         return parse_extstate_reply(resp.text, SECTION, key)
@@ -134,6 +155,15 @@ class ReaperBridgeClient:
             phase = self.get_extstate("export_phase")
             last_result = self.get_extstate("last_result_debug")
             heartbeat = v2_heartbeat or self.get_extstate("heartbeat")
+            bridge_exe_path = self.get_extstate("bridge_exe_path")
+            bridge_app_version = self.get_extstate("bridge_app_version")
+            bridge_resource_path = self.get_extstate("bridge_resource_path")
+            bridge_project_path = self.get_extstate("bridge_project_path")
+            selected_item_count = None
+            try:
+                selected_item_count = int(self.get_extstate("selected_item_count") or "0")
+            except (TypeError, ValueError):
+                selected_item_count = None
             bridge_protocol = 2 if v2_version and v2_heartbeat else 1
             heartbeat_age = None
             heartbeat_fresh = False
@@ -165,6 +195,11 @@ class ReaperBridgeClient:
                 heartbeat=heartbeat,
                 heartbeat_age_seconds=heartbeat_age,
                 bridge_protocol=bridge_protocol,
+                bridge_exe_path=bridge_exe_path,
+                bridge_app_version=bridge_app_version,
+                bridge_resource_path=bridge_resource_path,
+                bridge_project_path=bridge_project_path,
+                selected_item_count=selected_item_count,
             )
         except Exception as exc:
             return BridgeStatus(True, False, error=f"Bridge 状态读取失败: {exc}")
@@ -232,7 +267,7 @@ class ReaperBridgeClient:
 
     def _diagnostics(self) -> str:
         fields = {}
-        for key in ["bridge_version_v2", "bridge_version", "status", "heartbeat_v2", "heartbeat", "export_phase", "command_v2", "command", "last_command_debug", "last_result_debug", "result_v2", "result"]:
+        for key in ["bridge_version_v2", "bridge_version", "bridge_exe_path", "bridge_app_version", "bridge_resource_path", "bridge_project_path", "selected_item_count", "status", "heartbeat_v2", "heartbeat", "export_phase", "command_v2", "command", "last_command_debug", "last_result_debug", "result_v2", "result"]:
             try:
                 value = self.get_extstate(key)
             except Exception as exc:
@@ -245,8 +280,17 @@ class ReaperBridgeClient:
     def _wait_for_result(self, request_id: str, timeout: int, result_key: str = "result") -> Dict[str, Any]:
         start = time.time()
         last_raw = ""
+        last_read_error = ""
         while time.time() - start < timeout:
-            raw = self.get_extstate(result_key)
+            try:
+                raw = self.get_extstate(result_key)
+            except Exception as exc:
+                # REAPER's Web Interface can briefly stop answering while the
+                # Windows render helper starts or exits. Treat those as transient
+                # read misses; the bridge result may already be written.
+                last_read_error = str(exc)
+                time.sleep(POLL_INTERVAL_SECONDS)
+                continue
             if raw and raw != last_raw:
                 last_raw = raw
                 try:
@@ -263,7 +307,24 @@ class ReaperBridgeClient:
 def quick_bridge_export(project_name: str, theme_name: str, render_preview: bool = True, webui_port: int = 9000, capsule_type: str = "magic", export_dir: Optional[str] = None, username: Optional[str] = None) -> Dict[str, Any]:
     client = ReaperBridgeClient(port=webui_port)
     timeout = PREVIEW_BRIDGE_TIMEOUT_SECONDS if render_preview else BRIDGE_TIMEOUT_SECONDS
-    return client.export_capsule(project_name=project_name, theme_name=theme_name, render_preview=render_preview, capsule_type=capsule_type, export_dir=export_dir, username=username, timeout=timeout)
+    try:
+        return client.export_capsule(project_name=project_name, theme_name=theme_name, render_preview=render_preview, capsule_type=capsule_type, export_dir=export_dir, username=username, timeout=timeout)
+    except Exception:
+        diagnostics = json.loads(client._diagnostics())
+        try:
+            last_command = json.loads(diagnostics.get("last_command_debug") or "{}")
+        except json.JSONDecodeError:
+            last_command = {}
+        request_id = last_command.get("request_id")
+        for key in ("result_v2", "result", "last_result_debug"):
+            try:
+                data = json.loads(diagnostics.get(key) or "{}")
+            except json.JSONDecodeError:
+                continue
+            if request_id and data.get("request_id") == request_id and data.get("success") is True:
+                data.setdefault("mode", "bridge")
+                return data
+        raise
 
 
 def get_bridge_status(webui_port: int = 9000) -> Dict[str, Any]:

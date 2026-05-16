@@ -10,6 +10,12 @@ local RESULT_KEY = "result_v2"
 local HEARTBEAT_KEY = "heartbeat_v2"
 local VERSION_KEY = "bridge_version_v2"
 local RUNNING_KEY = "_CAPSULE_TRANSFER_BRIDGE_V2_RUNNING"
+local PROCESS_DISABLE_ENV = "CAPSULE_TRANSFER_BRIDGE_DISABLED"
+local NO_SELECTION_GRACE_SECONDS = 8
+
+if os.getenv(PROCESS_DISABLE_ENV) == "1" then
+  return
+end
 
 if _G[RUNNING_KEY] then
   local last_heartbeat = tonumber(reaper.GetExtState(SECTION, HEARTBEAT_KEY) or "")
@@ -26,6 +32,35 @@ local function Heartbeat()
   local now = tostring(os.time())
   reaper.SetExtState(SECTION, HEARTBEAT_KEY, now, false)
   reaper.SetExtState(SECTION, "heartbeat", now, false)
+
+  local exe_path = ""
+  if reaper.GetExePath then
+    local ok, result = pcall(reaper.GetExePath)
+    if ok and result then exe_path = tostring(result) end
+  end
+  reaper.SetExtState(SECTION, "bridge_exe_path", exe_path, false)
+
+  local app_version = ""
+  if reaper.GetAppVersion then
+    local ok, result = pcall(reaper.GetAppVersion)
+    if ok and result then app_version = tostring(result) end
+  end
+  reaper.SetExtState(SECTION, "bridge_app_version", app_version, false)
+
+  local resource_path = ""
+  if reaper.GetResourcePath then
+    local ok, result = pcall(reaper.GetResourcePath)
+    if ok and result then resource_path = tostring(result) end
+  end
+  reaper.SetExtState(SECTION, "bridge_resource_path", resource_path, false)
+
+  local project_path = ""
+  if reaper.EnumProjects then
+    local ok, _, result = pcall(reaper.EnumProjects, -1, "")
+    if ok and result then project_path = tostring(result) end
+  end
+  reaper.SetExtState(SECTION, "bridge_project_path", project_path, false)
+  reaper.SetExtState(SECTION, "selected_item_count", tostring(reaper.CountSelectedMediaItems(0)), false)
 end
 
 local function Phase(msg)
@@ -256,7 +291,24 @@ local function PollOnce()
 
   local raw = reaper.GetExtState(SECTION, COMMAND_KEY)
   if raw and raw ~= "" then
+    local command_type = ExtractJsonString(raw, "type") or ""
+    if command_type == "export_capsule" and reaper.CountSelectedMediaItems(0) == 0 then
+      local request_id = ExtractJsonString(raw, "request_id") or ""
+      local now = reaper.time_precise and reaper.time_precise() or os.time()
+      if _G._CAPSULE_TRANSFER_NO_SELECTION_REQUEST_ID ~= request_id then
+        _G._CAPSULE_TRANSFER_NO_SELECTION_REQUEST_ID = request_id
+        _G._CAPSULE_TRANSFER_NO_SELECTION_FIRST_SEEN = now
+      end
+      local first_seen = _G._CAPSULE_TRANSFER_NO_SELECTION_FIRST_SEEN or now
+      if (now - first_seen) < NO_SELECTION_GRACE_SECONDS then
+        Phase("export command skipped by instance with no selected items")
+        return
+      end
+    end
+
     reaper.SetExtState(SECTION, COMMAND_KEY, "", false)
+    _G._CAPSULE_TRANSFER_NO_SELECTION_REQUEST_ID = nil
+    _G._CAPSULE_TRANSFER_NO_SELECTION_FIRST_SEEN = nil
     local ok, err = pcall(HandleCommand, raw)
     if not ok then
       local request_id = ExtractJsonString(raw, "request_id") or ""

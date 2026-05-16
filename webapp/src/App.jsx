@@ -66,6 +66,36 @@ function Shell() {
   const [isSending, setIsSending] = useState(false);
   const [captureStatus, setCaptureStatus] = useState(null);
 
+  const captureStepsForPhase = useCallback((phase = '', renderPreview = true) => {
+    const lower = String(phase || '').toLowerCase();
+    const savingDone = lower.includes('rendering preview') || lower.includes('saving capsule: done');
+    const rendering = lower.includes('rendering preview: starting');
+    const renderDone = lower.includes('rendering preview: finished');
+    const renderSkipped = lower.includes('rendering preview: skipped') || !renderPreview;
+    return [
+      {
+        id: 'save',
+        label: '保存胶囊',
+        status: savingDone || rendering || renderDone ? 'done' : 'active',
+        detail: savingDone || rendering || renderDone ? '胶囊本体已保存。' : '正在导出 RPP、Audio 和 metadata。',
+      },
+      {
+        id: 'preview',
+        label: '渲染预览文件',
+        status: !renderPreview ? 'skipped' : renderDone ? 'done' : renderSkipped ? 'skipped' : rendering ? 'active' : 'pending',
+        detail: !renderPreview
+          ? '本次未请求预览。'
+          : renderDone
+            ? '预览渲染已完成，正在写入结果。'
+            : renderSkipped
+              ? '预览渲染已跳过。'
+              : rendering
+                ? '正在通过胶囊 RPP 渲染预览。'
+                : '等待保存胶囊完成后开始。',
+      },
+    ];
+  }, []);
+
   const refreshAll = useCallback(async () => {
     try {
       const net = await api.network();
@@ -142,11 +172,59 @@ function Shell() {
   };
 
   const handleCreateCapsule = async (payload) => {
-    setCaptureStatus({ phase: 'exporting', message: '正在连接 REAPER Bridge…' });
+    const initialSteps = captureStepsForPhase('', payload?.render_preview);
+    setCaptureStatus({ phase: 'saving', message: '正在连接 REAPER Bridge...', steps: initialSteps });
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), payload?.render_preview ? 150000 : 60000);
+    let phasePollId = null;
+    let renderHintTimeoutId = null;
+    let captureActive = true;
     try {
-      setCaptureStatus({ phase: 'exporting', message: '正在后台导出选中的 Items，REAPER 可保持最小化。' });
+      setCaptureStatus({ phase: 'saving', message: '正在保存胶囊本体，REAPER 可保持最小化。', steps: initialSteps });
+      if (payload?.render_preview) {
+        renderHintTimeoutId = setTimeout(() => {
+          if (!captureActive) return;
+          setCaptureStatus((prev) => {
+            if (!captureActive || prev?.phase === 'done' || prev?.phase === 'error') return prev;
+            return {
+              phase: 'rendering',
+              message: '胶囊本体已提交，正在渲染预览文件。',
+              steps: [
+                { id: 'save', label: '保存胶囊', status: 'done', detail: '胶囊本体正在完成入库。' },
+                { id: 'preview', label: '渲染预览文件', status: 'active', detail: '正在通过胶囊 RPP 渲染预览。' },
+              ],
+            };
+          });
+        }, 2500);
+      }
+      phasePollId = setInterval(async () => {
+        try {
+          const status = await api.getReaperBridgeStatus();
+          if (!captureActive) return;
+          const bridgePhase = status.data?.export_phase || '';
+          if (!bridgePhase) return;
+          const lower = bridgePhase.toLowerCase();
+          if (!lower.includes('saving capsule') && !lower.includes('rendering preview')) return;
+          const steps = captureStepsForPhase(bridgePhase, payload?.render_preview);
+          const message = lower.includes('rendering preview')
+            ? '胶囊已保存，正在渲染预览文件。'
+            : '正在保存胶囊本体，REAPER 可保持最小化。';
+          setCaptureStatus((prev) => {
+            if (!captureActive || prev?.phase === 'done' || prev?.phase === 'error') return prev;
+            const allDone = (prev?.steps || []).length > 0 && (prev.steps || []).every((step) => step.status === 'done' || step.status === 'skipped');
+            if (allDone) return prev;
+            const nextPhase = lower.includes('rendering preview') ? 'rendering' : 'saving';
+            const next = { phase: nextPhase, message, steps };
+            const nextAllDone = steps.length > 0 && steps.every((step) => step.status === 'done' || step.status === 'skipped');
+            if (nextAllDone) {
+              return { ...next, phase: 'done', settled: true };
+            }
+            return next;
+          });
+        } catch {
+          // Keep the last visible phase if polling briefly fails.
+        }
+      }, 800);
       const resp = await fetch(`${api.base}/capsules/webui-export`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -154,6 +232,16 @@ function Shell() {
         signal: controller.signal,
       });
       const body = await resp.json().catch(() => ({ success: false, error: `HTTP ${resp.status}` }));
+      captureActive = false;
+      controller.abort();
+      if (phasePollId) {
+        clearInterval(phasePollId);
+        phasePollId = null;
+      }
+      if (renderHintTimeoutId) {
+        clearTimeout(renderHintTimeoutId);
+        renderHintTimeoutId = null;
+      }
       if (!resp.ok || !body.success) {
         const flags = body.data || {};
         let message = body.error || `HTTP ${resp.status}`;
@@ -165,13 +253,36 @@ function Shell() {
       }
 
       const imported = body.data?.auto_imported;
+      const exportResult = body.data?.export_result || {};
+      const previewRequested = Boolean(payload?.render_preview || exportResult.preview_requested);
+      const previewRendered = exportResult.preview_rendered === true;
+      const previewAudio = exportResult.preview_audio || '';
+      const doneSteps = [
+        {
+          id: 'save',
+          label: '保存胶囊',
+          status: imported && imported.length > 0 ? 'done' : 'warning',
+          detail: imported && imported.length > 0 ? '胶囊本体已保存并入库。' : '导出完成，但未能自动入库。',
+        },
+        {
+          id: 'preview',
+          label: '渲染预览文件',
+          status: !previewRequested ? 'skipped' : previewRendered ? 'done' : 'skipped',
+          detail: !previewRequested
+            ? '本次未请求预览。'
+            : previewRendered
+              ? `预览已生成${previewAudio ? `：${previewAudio}` : '。'}`
+              : (exportResult.preview_note || '预览未生成；胶囊本体不受影响。'),
+        },
+      ];
       if (imported && imported.length > 0) {
-        setCaptureStatus({ phase: 'done', message: `捕获成功：${imported[0].name}` });
-        setTimeout(() => setCaptureStatus(null), 2200);
+        const previewLine = previewRequested
+          ? (previewRendered ? '预览文件已生成。' : '预览文件未生成，胶囊已保存。')
+          : '未请求预览文件。';
+        setCaptureStatus((prev) => ({ phase: 'done', message: `捕获成功：${imported[0].name}\n${previewLine}`, steps: doneSteps, settled: true, previousPhase: prev?.phase }));
         toast.success(`已从 REAPER 捕获：${imported[0].name}`);
       } else {
-        setCaptureStatus({ phase: 'done', message: 'REAPER 导出完成，但未能自动入库，请检查导出目录。' });
-        setTimeout(() => setCaptureStatus(null), 3000);
+        setCaptureStatus((prev) => ({ phase: 'done', message: 'REAPER 导出完成，但未能自动入库，请检查导出目录。', steps: doneSteps, settled: true, previousPhase: prev?.phase }));
       }
       refreshAll();
     } catch (e) {
@@ -181,6 +292,9 @@ function Shell() {
       setCaptureStatus({ phase: 'error', message });
       toast.error(`REAPER 捕获失败：${message}`);
     } finally {
+      captureActive = false;
+      if (phasePollId) clearInterval(phasePollId);
+      if (renderHintTimeoutId) clearTimeout(renderHintTimeoutId);
       clearTimeout(timeoutId);
     }
   };
@@ -282,7 +396,7 @@ function Shell() {
           {activeTab === 'settings' && <SettingsView networkInfo={networkInfo} apiBase={api.base} />}
         </main>
       </div>
-      {captureStatus && <CaptureOverlay status={captureStatus} onClose={() => setCaptureStatus(null)} />}
+      {captureStatus && <CaptureOverlayV2 status={captureStatus} onClose={() => setCaptureStatus(null)} />}
     </div>
   );
 }
@@ -444,10 +558,67 @@ function Row({ k, v }) {
 }
 
 function CaptureOverlay({ status, onClose }) {
-  const isWorking = status.phase === 'exporting';
+  const isWorking = ['exporting', 'saving', 'rendering'].includes(status.phase);
   const isDone = status.phase === 'done';
   const isError = status.phase === 'error';
+  const steps = status.steps || [];
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"><div className="bg-[#1a1d24] border border-slate-700 rounded-3xl p-8 w-[380px] shadow-2xl text-center">{isWorking && <><div className="w-14 h-14 mx-auto mb-5 rounded-full bg-indigo-600/20 flex items-center justify-center"><RefreshCw size={28} className="text-indigo-400 animate-spin" /></div><h3 className="text-lg font-bold text-white mb-2">正在捕获胶囊</h3><p className="text-sm text-slate-400 leading-relaxed whitespace-pre-line">{status.message}</p><div className="mt-5 h-1 bg-slate-800 rounded-full overflow-hidden"><div className="h-full w-2/3 bg-indigo-500 rounded-full animate-pulse" /></div></>}{isDone && <><div className="w-14 h-14 mx-auto mb-5 rounded-full bg-emerald-600/20 flex items-center justify-center"><Zap size={28} className="text-emerald-400" fill="currentColor" /></div><h3 className="text-lg font-bold text-white mb-2">捕获完成</h3><p className="text-sm text-slate-400 whitespace-pre-line">{status.message}</p></>}{isError && <><div className="w-14 h-14 mx-auto mb-5 rounded-full bg-red-600/20 flex items-center justify-center"><FileAudio size={28} className="text-red-400" /></div><h3 className="text-lg font-bold text-white mb-2">捕获失败</h3><p className="text-sm text-red-300 leading-relaxed whitespace-pre-line">{status.message}</p><button onClick={onClose} className="mt-5 px-5 py-2 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg">关闭</button></>}</div></div>;
+}
+
+function CaptureOverlayV2({ status, onClose }) {
+  const isWorking = ['exporting', 'saving', 'rendering'].includes(status.phase);
+  const isDone = status.phase === 'done';
+  const isError = status.phase === 'error';
+  const showWorkingLayout = isWorking || (isDone && status.settled);
+  const steps = status.steps || [];
+  const stepStyle = (step) => {
+    if (step.status === 'done') return 'bg-emerald-500/15 text-emerald-300 border-emerald-500/25';
+    if (step.status === 'active') return 'bg-indigo-500/15 text-indigo-300 border-indigo-500/25';
+    if (step.status === 'warning') return 'bg-amber-500/15 text-amber-300 border-amber-500/25';
+    if (step.status === 'skipped') return 'bg-slate-800 text-slate-500 border-slate-700';
+    return 'bg-slate-900 text-slate-500 border-slate-800';
+  };
+  const stepIcon = (step) => {
+    if (step.status === 'done') return <Check size={13} />;
+    if (step.status === 'active') return <RefreshCw size={13} className="animate-spin" />;
+    if (step.status === 'warning') return <AlertTriangle size={13} />;
+    if (step.status === 'skipped') return <X size={13} />;
+    return <span className="block w-1.5 h-1.5 rounded-full bg-current" />;
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <div className="bg-[#1a1d24] border border-slate-700 rounded-3xl p-8 w-[420px] shadow-2xl text-center">
+        {showWorkingLayout && <>
+          <div className={`w-14 h-14 mx-auto mb-5 rounded-full flex items-center justify-center ${isDone ? 'bg-emerald-600/20' : 'bg-indigo-600/20'}`}>{isDone ? <Check size={28} className="text-emerald-400" /> : <RefreshCw size={28} className="text-indigo-400 animate-spin" />}</div>
+          <h3 className="text-lg font-bold text-white mb-2">{isDone ? '捕获完成' : '正在捕获胶囊'}</h3>
+          <p className="text-sm text-slate-400 leading-relaxed whitespace-pre-line">{status.message}</p>
+        </>}
+        {isDone && !status.settled && <>
+          <div className="w-14 h-14 mx-auto mb-5 rounded-full bg-emerald-600/20 flex items-center justify-center"><Zap size={28} className="text-emerald-400" fill="currentColor" /></div>
+          <h3 className="text-lg font-bold text-white mb-2">捕获完成</h3>
+          <p className="text-sm text-slate-400 whitespace-pre-line">{status.message}</p>
+        </>}
+        {isError && <>
+          <div className="w-14 h-14 mx-auto mb-5 rounded-full bg-red-600/20 flex items-center justify-center"><FileAudio size={28} className="text-red-400" /></div>
+          <h3 className="text-lg font-bold text-white mb-2">捕获失败</h3>
+          <p className="text-sm text-red-300 leading-relaxed whitespace-pre-line">{status.message}</p>
+        </>}
+        {steps.length > 0 && <div className="mt-6 space-y-2 text-left">
+          {steps.map((step) => (
+            <div key={step.id} className={`border rounded-xl px-3 py-2.5 flex items-start space-x-3 ${stepStyle(step)}`}>
+              <div className="w-5 h-5 rounded-full border border-current/30 flex items-center justify-center mt-0.5 shrink-0">{stepIcon(step)}</div>
+              <div className="min-w-0">
+                <div className="text-sm font-semibold">{step.label}</div>
+                {step.detail && <div className="text-xs opacity-75 mt-0.5 leading-relaxed">{step.detail}</div>}
+              </div>
+            </div>
+          ))}
+        </div>}
+        {isWorking && <div className="mt-5 h-1 bg-slate-800 rounded-full overflow-hidden"><div className="h-full w-2/3 bg-indigo-500 rounded-full animate-pulse" /></div>}
+        {(isDone || isError) && <button onClick={onClose} className="mt-5 px-5 py-2 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg">关闭</button>}
+      </div>
+    </div>
+  );
 }
 
 function CreateCapsuleForm({ onCancel, onSubmit }) {

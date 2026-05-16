@@ -23,6 +23,8 @@ def _find_reaper_executable(load_config: Callable[[], dict]) -> Path | None:
         p = Path(configured)
         if p.is_dir() and p.suffix == ".app":
             p = p / "Contents" / "MacOS" / "REAPER"
+        elif p.is_dir() and platform.system() == "Windows":
+            p = p / "reaper.exe"
         if p.exists() and p.is_file():
             return p
 
@@ -49,6 +51,13 @@ def _find_reaper_executable(load_config: Callable[[], dict]) -> Path | None:
         if p.exists() and p.is_file():
             return p
     return None
+
+
+def _normalize_windows_reaper_path(path: str) -> Path:
+    p = Path(path)
+    if platform.system() == "Windows" and p.suffix.lower() != ".exe":
+        p = p / "reaper.exe"
+    return p.resolve()
 
 
 def _run_reaper_script(reaper_exe: Path, lua_script: Path) -> tuple[bool, str]:
@@ -117,10 +126,18 @@ def register_reaper_bridge_routes(app, ok, err, data_pipeline_dir: Path, load_co
             }
 
         lua_dir = data_pipeline_dir / "lua_scripts"
+        configured_reaper = _find_reaper_executable(load_config)
+        bridge_exe_path = status.get("bridge_exe_path") or ""
+        configured_reaper_path = str(configured_reaper) if configured_reaper else ""
+        reaper_path_match = None
+        if bridge_exe_path and configured_reaper_path:
+            reaper_path_match = _normalize_windows_reaper_path(bridge_exe_path) == _normalize_windows_reaper_path(configured_reaper_path)
         status.update({
             "webui_port": port,
             "bridge_script": str(lua_dir / "capsule_bridge.lua"),
             "installer_script": str(lua_dir / "install_capsule_bridge.lua"),
+            "configured_reaper_path": configured_reaper_path,
+            "reaper_path_match": reaper_path_match,
         })
         return ok(status)
 

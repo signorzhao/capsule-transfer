@@ -246,6 +246,18 @@ def get_capsule_by_id(cap_id: str) -> dict | None:
     return None
 
 
+def get_capsule_dir_by_id(cap_id: str) -> Path | None:
+    d = CAPSULES_DIR / cap_id
+    if d.exists() and d.is_dir():
+        return d
+    for sub in CAPSULES_DIR.iterdir():
+        if sub.is_dir():
+            c = _capsule_from_dir(sub)
+            if c and c["uuid"] == cap_id:
+                return sub
+    return None
+
+
 # ---------------------- 联系人文件管理 ----------------------
 
 def _load_contacts() -> list[dict]:
@@ -344,8 +356,8 @@ def create_capsule():
 
 @app.route("/api/capsules/<cap_id>", methods=["DELETE"])
 def delete_capsule(cap_id: str):
-    target = CAPSULES_DIR / cap_id
-    if not target.exists():
+    target = get_capsule_dir_by_id(cap_id)
+    if not target:
         return _err("胶囊不存在", 404)
     shutil.rmtree(target, ignore_errors=True)
     return _ok({"id": cap_id})
@@ -353,8 +365,8 @@ def delete_capsule(cap_id: str):
 
 @app.route("/api/capsules/<cap_id>", methods=["PATCH"])
 def update_capsule(cap_id: str):
-    target = CAPSULES_DIR / cap_id
-    if not target.exists():
+    target = get_capsule_dir_by_id(cap_id)
+    if not target:
         return _err("胶囊不存在", 404)
     manifest = _read_manifest(target)
     if not manifest:
@@ -369,8 +381,8 @@ def update_capsule(cap_id: str):
 
 @app.route("/api/capsules/<cap_id>/preview", methods=["GET"])
 def capsule_preview(cap_id: str):
-    target = CAPSULES_DIR / cap_id
-    if not target.exists():
+    target = get_capsule_dir_by_id(cap_id)
+    if not target:
         return _err("胶囊不存在", 404)
     manifest = _read_manifest(target)
     if manifest:
@@ -391,8 +403,8 @@ def capsule_preview(cap_id: str):
 
 @app.route("/api/capsules/<cap_id>/open-rpp", methods=["POST"])
 def open_capsule_rpp(cap_id: str):
-    target = CAPSULES_DIR / cap_id
-    if not target.exists():
+    target = get_capsule_dir_by_id(cap_id)
+    if not target:
         return _err("胶囊不存在", 404)
     manifest = _read_manifest(target)
     rpp_path = None
@@ -411,6 +423,19 @@ def open_capsule_rpp(cap_id: str):
             subprocess.Popen(["open", str(rpp_path)])
         elif platform.system() == "Windows":
             os.startfile(str(rpp_path))
+            subprocess.Popen(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-Command",
+                    "Start-Sleep -Milliseconds 500; "
+                    "$wshell = New-Object -ComObject WScript.Shell; "
+                    "$null = $wshell.AppActivate('REAPER')",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
         else:
             subprocess.Popen(["xdg-open", str(rpp_path)])
     except Exception as e:
@@ -420,8 +445,8 @@ def open_capsule_rpp(cap_id: str):
 
 @app.route("/api/capsules/<cap_id>/bundle", methods=["GET"])
 def download_bundle(cap_id: str):
-    target = CAPSULES_DIR / cap_id
-    if not target.exists():
+    target = get_capsule_dir_by_id(cap_id)
+    if not target:
         return _err("胶囊不存在", 404)
     cap = _capsule_from_dir(target)
     if not cap:
@@ -510,11 +535,32 @@ def webui_export():
 
             cap_uuid = meta.get("uuid") or meta.get("id") or str(uuid_lib.uuid4())
             name = meta.get("name") or expected_name or capsule_dir_path.name
-            final_target = CAPSULES_DIR / cap_uuid
-            if capsule_dir_path.resolve() != final_target.resolve():
-                if final_target.exists():
-                    shutil.rmtree(final_target)
-                shutil.move(str(capsule_dir_path), str(final_target))
+            final_target = capsule_dir_path
+            preview_name = meta.get("preview_audio") or (meta.get("files") or {}).get("preview")
+            preview_requested = bool(render_preview or result.get("preview_requested"))
+            if preview_requested and preview_name:
+                preview_path = capsule_dir_path / preview_name
+                if preview_path.exists():
+                    result["preview_rendered"] = True
+                    result["preview_audio"] = preview_name
+                    result["preview_note"] = "preview rendered"
+                elif result.get("preview_rendered") is False:
+                    preview_name = ""
+                    result["preview_audio"] = ""
+                    result["preview_note"] = result.get("preview_note") or "preview requested but skipped on Windows"
+                else:
+                    preview_waited = 0.0
+                    while not preview_path.exists() and preview_waited < 5:
+                        time.sleep(0.5)
+                        preview_waited += 0.5
+                    if preview_path.exists():
+                        result["preview_rendered"] = True
+                        result["preview_audio"] = preview_name
+                        result["preview_note"] = "preview rendered"
+                    else:
+                        preview_name = ""
+                        result["preview_audio"] = ""
+                        result["preview_note"] = "preview requested but output file was not found"
 
             tech = meta.get("info", {}) or {}
             plugins = meta.get("plugins", {}) or {}
@@ -526,7 +572,7 @@ def webui_export():
                     "name": name,
                     "project_name": meta.get("project_name"),
                     "capsule_type": capsule_type,
-                    "preview_audio": meta.get("preview_audio") or (meta.get("files") or {}).get("preview"),
+                    "preview_audio": preview_name,
                     "rpp_file": meta.get("rpp_file") or (meta.get("files") or {}).get("project"),
                     "keywords": meta.get("keywords"),
                     "description": meta.get("description"),

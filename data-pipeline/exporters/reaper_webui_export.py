@@ -47,7 +47,7 @@ def sanitize_path_for_lua(path: str) -> str:
 class ReaperWebUIExporter:
     """Focus-safe REAPER exporter backed by the persistent bridge."""
 
-    def __init__(self, host: str = "localhost", port: int = 9000):
+    def __init__(self, host: str = "127.0.0.1", port: int = 9000):
         self.host = host
         self.port = port
         self.base_url = f"http://{host}:{port}"

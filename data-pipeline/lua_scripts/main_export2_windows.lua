@@ -7,6 +7,7 @@
 -- 全局变量：控制控制台输出
 -- 设为 false 避免弹出 REAPER 控制台窗口，调试时可设为 true
 local ENABLE_CONSOLE = false
+local MAX_PREVIEW_SECONDS = 60
 
 -- 保存原始的 ShowConsoleMsg 函数
 local _original_ShowConsoleMsg = reaper.ShowConsoleMsg
@@ -15,6 +16,12 @@ local _original_ShowConsoleMsg = reaper.ShowConsoleMsg
 function Log(msg)
     if ENABLE_CONSOLE then
         _original_ShowConsoleMsg(msg)
+    end
+end
+
+local function BridgePhase(msg)
+    if reaper and reaper.SetExtState then
+        reaper.SetExtState("capsule_transfer", "export_phase", tostring(msg or ""), false)
     end
 end
 
@@ -45,6 +52,12 @@ local function GetDirectoryPath(filePath)
     return dir
 end
 
+local function GetCurrentScriptDir()
+    local src = debug.getinfo(1).source or ""
+    local path = src:match("@(.*)$") or src
+    return GetDirectoryPath(path)
+end
+
 -- 跨平台路径拼接
 local function JoinPath(base, ...)
     if not base or base == "" then
@@ -65,6 +78,16 @@ local function JoinPath(base, ...)
         end
     end
     return result
+end
+
+local function RunCommandHidden(command, timeoutMs)
+    if reaper.ExecProcess then
+        local ok, result = pcall(reaper.ExecProcess, command, timeoutMs or 190000)
+        if ok then
+            return result
+        end
+    end
+    return os.execute(command)
 end
 
 -- 跨平台创建目录（递归创建）
@@ -409,6 +432,16 @@ function SetTimeSelection(startTime, endTime)
     reaper.GetSet_LoopTimeRange(true, false, startTime, endTime, false)
 end
 
+local function ClampPreviewEndTime(startTime, endTime)
+    if not startTime or not endTime then
+        return startTime or 0, endTime or 0, false
+    end
+    if endTime - startTime > MAX_PREVIEW_SECONDS then
+        return startTime, startTime + MAX_PREVIEW_SECONDS, true
+    end
+    return startTime, endTime, false
+end
+
 -- 检测系统是否安装 FFmpeg
 function CheckFFmpegAvailable()
     local cmd = 'ffmpeg -version 2>&1'
@@ -446,9 +479,10 @@ function ConvertWavToOgg(wavPath, oggPath)
     local ffmpegCmd = string.format('ffmpeg -y -i "%s" -c:a libvorbis -q:a 4 "%s"', wavPath, oggPath)
 
     -- 执行转换
-    local result = os.execute(ffmpegCmd .. ' 2>&1')
+    local result, exitType, exitCode = os.execute(ffmpegCmd .. ' 2>&1')
+    local commandOk = (result == true) or (result == 0) or (exitCode == 0)
 
-    if result == 0 then
+    if commandOk then
         -- 验证输出文件
         local oggFile = io.open(oggPath, "r")
         if oggFile then
@@ -463,6 +497,153 @@ function ConvertWavToOgg(wavPath, oggPath)
 end
 
 -- 修剪工程：删除未标记的轨道
+local function SplitOutputPath(path)
+    local dir = GetDirectoryPath(path)
+    local name = tostring(path or ""):match("[^/\\]+$") or ""
+    local base = name:gsub("%.[^%.]+$", "")
+    return dir, base, name
+end
+
+local function GetProjectStringInfo(key)
+    local _, value = reaper.GetSetProjectInfo_String(0, key, "", false)
+    return value or ""
+end
+
+local function SetProjectStringInfo(key, value)
+    reaper.GetSetProjectInfo_String(0, key, value or "", true)
+end
+
+local function GetProjectNumericInfo(key)
+    return reaper.GetSetProjectInfo(0, key, 0, false) or 0
+end
+
+local function SetProjectNumericInfo(key, value)
+    reaper.GetSetProjectInfo(0, key, value or 0, true)
+end
+
+local function RestoreCurrentProjectRenderState(state)
+    if not state then return end
+    SetProjectStringInfo("RENDER_FILE", state.render_file)
+    SetProjectStringInfo("RENDER_PATTERN", state.render_pattern)
+    SetProjectStringInfo("RENDER_FORMAT", state.render_format)
+    SetProjectNumericInfo("RENDER_RANGE", state.render_range)
+    SetProjectNumericInfo("RENDER_STEMS", state.render_stems)
+    SetProjectNumericInfo("RENDER_1X", state.render_1x)
+    reaper.GetSet_LoopTimeRange(true, false, state.time_start or 0, state.time_end or 0, false)
+end
+
+function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime)
+    reaper.ShowConsoleMsg("\n[RenderPreviewAudioFromCurrentProject] start\n")
+    reaper.ShowConsoleMsg("  output: " .. tostring(outputPath) .. "\n")
+
+    local previewStartTime, previewEndTime, previewClamped = ClampPreviewEndTime(startTime, endTime)
+    if previewClamped then
+        reaper.ShowConsoleMsg("  preview clamped to " .. MAX_PREVIEW_SECONDS .. " seconds\n")
+    end
+
+    local outputDir, outputBase = SplitOutputPath(outputPath)
+    if outputDir == "" or outputBase == "" then
+        reaper.ShowConsoleMsg("  invalid preview output path\n")
+        return false
+    end
+    MakeDir(outputDir)
+
+    local isOggOutput = string.match(outputPath, "%.ogg$")
+    local renderPath = outputPath
+    local tempWavPath = nil
+    if isOggOutput then
+        local ffmpegAvailable = CheckFFmpegAvailable()
+        if ffmpegAvailable then
+            tempWavPath = string.gsub(outputPath, "%.ogg$", "_temp.wav")
+            renderPath = tempWavPath
+        else
+            renderPath = string.gsub(outputPath, "%.ogg$", ".wav")
+            reaper.ShowConsoleMsg("  ffmpeg unavailable, keeping WAV preview\n")
+        end
+    end
+
+    local renderDir, renderBase = SplitOutputPath(renderPath)
+    os.remove(renderPath)
+    if outputPath ~= renderPath then
+        os.remove(outputPath)
+    end
+    local timeStart, timeEnd = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+    local state = {
+        render_file = GetProjectStringInfo("RENDER_FILE"),
+        render_pattern = GetProjectStringInfo("RENDER_PATTERN"),
+        render_format = GetProjectStringInfo("RENDER_FORMAT"),
+        render_range = GetProjectNumericInfo("RENDER_RANGE"),
+        render_stems = GetProjectNumericInfo("RENDER_STEMS"),
+        render_1x = GetProjectNumericInfo("RENDER_1X"),
+        time_start = timeStart,
+        time_end = timeEnd,
+    }
+
+    local renderOk = false
+    local ok, err = pcall(function()
+        reaper.GetSet_LoopTimeRange(true, false, previewStartTime, previewEndTime, false)
+        SetProjectStringInfo("RENDER_FILE", renderDir)
+        SetProjectStringInfo("RENDER_PATTERN", renderBase)
+        -- Render WAV from the current project, then convert to OGG if needed.
+        -- This avoids depending on the user's REAPER encoder configuration.
+        SetProjectStringInfo("RENDER_FORMAT", "evaw")
+        SetProjectNumericInfo("RENDER_RANGE", 1)
+        SetProjectNumericInfo("RENDER_STEMS", 0)
+        SetProjectNumericInfo("RENDER_1X", 0)
+        reaper.UpdateArrange()
+        if reaper.RenderProject_Table then
+            local success, ret = reaper.RenderProject_Table(
+                nil,
+                2,
+                previewStartTime,
+                previewEndTime,
+                1.0,
+                renderPath,
+                0,
+                0,
+                false
+            )
+            renderOk = (success == true and ret ~= false)
+        elseif reaper.RenderProject then
+            local ret = reaper.RenderProject(nil, false, false, renderPath)
+            renderOk = tonumber(ret or 0) > 0
+        else
+            renderOk = false
+        end
+    end)
+
+    RestoreCurrentProjectRenderState(state)
+
+    if not ok then
+        reaper.ShowConsoleMsg("  current project preview render failed: " .. tostring(err) .. "\n")
+        return false
+    end
+    if not renderOk then
+        reaper.ShowConsoleMsg("  current project preview render API was unavailable or returned failure\n")
+        return false
+    end
+
+    local f = io.open(renderPath, "r")
+    if not f then
+        reaper.ShowConsoleMsg("  preview output not found: " .. tostring(renderPath) .. "\n")
+        return false
+    end
+    f:close()
+
+    if tempWavPath and isOggOutput then
+        if ConvertWavToOgg(tempWavPath, outputPath) then
+            os.execute('del /Q "' .. tempWavPath:gsub("/", "\\") .. '" >nul 2>&1')
+            return true
+        end
+        reaper.ShowConsoleMsg("  WAV to OGG conversion failed, keeping WAV preview\n")
+        local finalWavPath = string.gsub(outputPath, "%.ogg$", ".wav")
+        os.execute('move /Y "' .. tempWavPath:gsub("/", "\\") .. '" "' .. finalWavPath:gsub("/", "\\") .. '" >nul 2>&1')
+        return true
+    end
+
+    return true
+end
+
 function PruneTracks(keepTracks)
     local trackCount = reaper.CountTracks(0)
     
@@ -1252,6 +1433,40 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
             end
         end
     end
+
+    -- Windows RPP FILE lines often contain single backslashes. The pattern
+    -- replacement above can miss those paths, so rewrite FILE entries by
+    -- parsing the quoted value and matching normalized path variants.
+    local filePathLookup = {}
+    for origPath, newPath in pairs(pathMapping) do
+        local baseName = string.match(origPath, "([^/\\]+)$")
+        local slashPath = origPath:gsub("\\", "/")
+        local backslashPath = origPath:gsub("/", "\\")
+        filePathLookup[origPath] = newPath
+        filePathLookup[slashPath] = newPath
+        filePathLookup[backslashPath] = newPath
+        if baseName then
+            filePathLookup[baseName] = newPath
+            filePathLookup["Audio/" .. baseName] = newPath
+            filePathLookup["Audio\\" .. baseName] = newPath
+        end
+    end
+
+    content = content:gsub('(FILE%s+")([^"]-)(")', function(prefix, filePath, suffix)
+        local normalized = filePath:gsub("\\", "/")
+        local backslashed = filePath:gsub("/", "\\")
+        local baseName = string.match(filePath, "([^/\\]+)$")
+        local replacement =
+            filePathLookup[filePath] or
+            filePathLookup[normalized] or
+            filePathLookup[backslashed] or
+            (baseName and filePathLookup[baseName])
+        if replacement then
+            replacedCount = replacedCount + 1
+            return prefix .. replacement .. suffix
+        end
+        return prefix .. filePath .. suffix
+    end)
     reaper.ShowConsoleMsg("共替换 " .. replacedCount .. " 处路径\n")
     
     -- 将剩余的相对媒体路径转为绝对路径（避免渲染时弹出"丢失媒体"对话框）
@@ -1277,12 +1492,14 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
         reaper.ShowConsoleMsg("设置渲染参数 (OGG)...\n")
         
         local renderDir = outputDir:gsub("\\", "/")
-        local actualStartTime = startTime or 0
-        local actualEndTime = endTime or 0
+        local actualStartTime, actualEndTime, previewClamped = ClampPreviewEndTime(startTime or 0, endTime or 0)
         
         reaper.ShowConsoleMsg("  RENDER_FILE (目录): " .. renderDir .. "\n")
         reaper.ShowConsoleMsg("  RENDER_PATTERN (文件名): " .. capsuleName .. "\n")
         reaper.ShowConsoleMsg("  时间范围: " .. string.format("%.6f - %.6f", actualStartTime, actualEndTime) .. "\n")
+        if previewClamped then
+            reaper.ShowConsoleMsg("  预览已限制为最长 " .. MAX_PREVIEW_SECONDS .. " 秒\n")
+        end
         
         -- 先删除所有旧的渲染相关设置
         content = content:gsub('RENDER_FILE [^\n]*\n?', '')
@@ -2334,6 +2551,10 @@ function RenderPreviewAudioFromRPP(rppPath, outputPath, startTime, endTime)
     reaper.ShowConsoleMsg("\n[RenderPreviewAudioFromRPP] 函数开始\n")
     reaper.ShowConsoleMsg("  RPP路径: " .. rppPath .. "\n")
     reaper.ShowConsoleMsg("  输出路径: " .. outputPath .. "\n")
+    local previewStartTime, previewEndTime, previewClamped = ClampPreviewEndTime(startTime, endTime)
+    if previewClamped then
+        reaper.ShowConsoleMsg("  预览已限制为最长 " .. MAX_PREVIEW_SECONDS .. " 秒\n")
+    end
 
     -- 检查是否需要 OGG 格式
     local isOggOutput = string.match(outputPath, "%.ogg$")
@@ -2438,13 +2659,19 @@ function RenderPreviewAudioFromRPP(rppPath, outputPath, startTime, endTime)
     -- 修复RPP文件中的渲染设置（直接修改文件内容）
     if startTime and endTime then
         reaper.ShowConsoleMsg("  修复RPP渲染设置...\n")
-        FixRPPRenderSettings(rppPath, tempWavPath or outputPath, startTime, endTime)
+        FixRPPRenderSettings(rppPath, tempWavPath or outputPath, previewStartTime, previewEndTime)
     end
 
     -- 构建渲染命令（添加 -nosplash -ignoreerrors -nonewinst 参数，Windows 用 start /B 后台运行）
     local renderCmd
     if IsWindows() then
-        renderCmd = string.format('start /B "" "%s" -renderproject "%s" -nosplash -ignoreerrors -nonewinst', reaperPath, rppPath)
+        local helperPath = JoinPath(GetCurrentScriptDir(), "..", "scripts", "render_background_windows.vbs")
+        renderCmd = string.format(
+            'wscript.exe //B //Nologo "%s" "%s" "%s"',
+            helperPath,
+            reaperPath,
+            rppPath
+        )
     else
         renderCmd = string.format('"%s" -renderproject "%s" -nosplash -ignoreerrors', reaperPath, rppPath)
     end
@@ -2452,7 +2679,7 @@ function RenderPreviewAudioFromRPP(rppPath, outputPath, startTime, endTime)
     reaper.ShowConsoleMsg("    " .. renderCmd .. "\n")
 
     -- 执行命令行渲染
-    local result = os.execute(renderCmd)
+    local result = RunCommandHidden(renderCmd, 190000)
     reaper.ShowConsoleMsg("  渲染命令返回码: " .. tostring(result) .. "\n")
 
     -- 等待文件写入完成
@@ -2593,6 +2820,7 @@ end
 
 -- 导出胶囊的主函数
 function ExportCapsule()
+    BridgePhase("saving capsule: checking selected items")
     -- 1. 锁定目标：识别选中的 Item 及其时间范围
     local itemCount = reaper.CountSelectedMediaItems(0)
     if itemCount == 0 then
@@ -2775,10 +3003,12 @@ function ExportCapsule()
     end
     
     -- 步骤 2：复制媒体文件到 Audio 目录
+    BridgePhase("saving capsule: copying media")
     local audioDir = JoinPath(outputDir, "Audio")
     local pathMapping, failedFiles = CopyMediaFiles(mediaFiles, audioDir)
     
     -- 步骤 3：生成新的 RPP 文件（不切换工程）
+    BridgePhase("saving capsule: generating rpp")
     -- 传递选中 items 的时间范围用于渲染
     local rppPath = GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, exportPreview, startTime, endTime, hasMidiItems)
     
@@ -2788,39 +3018,73 @@ function ExportCapsule()
     end
     
     -- 步骤 4：生成 metadata.json
+    BridgePhase("saving capsule: writing metadata")
     GenerateCapsuleMetadata(outputDir, capsuleName, capsuleType, collectedItemsInfo, mediaFiles, failedFiles)
+    BridgePhase("saving capsule: done")
     
     -- 步骤 5：渲染预览音频（使用 -renderproject 命令）
     if exportPreview then
+        BridgePhase("rendering preview: starting")
         reaper.ShowConsoleMsg("\n=== 渲染预览音频 ===\n")
-        
+
         local reaperPath = nil
         if IsWindows() then
-            local possiblePaths = {
-                "C:\\Program Files\\REAPER (x64)\\reaper.exe",
-                "C:\\Program Files\\REAPER (arm64)\\reaper.exe",
-                "C:\\Program Files\\REAPER\\reaper.exe",
-                "C:\\Program Files (x86)\\REAPER\\reaper.exe",
-            }
-            for _, path in ipairs(possiblePaths) do
-                local f = io.open(path, "r")
-                if f then
-                    f:close()
-                    reaperPath = path
-                    break
+            if reaper.GetExePath then
+                local exePath = reaper.GetExePath()
+                if exePath and exePath ~= "" then
+                    local candidates = {
+                        exePath,
+                        JoinPath(exePath, "reaper.exe"),
+                    }
+                    for _, path in ipairs(candidates) do
+                        local f = io.open(path, "r")
+                        if f then
+                            f:close()
+                            reaperPath = path
+                            break
+                        end
+                    end
+                end
+            end
+
+            if not reaperPath then
+                local possiblePaths = {
+                    "C:\\My Audio Tools\\REAPER\\reaper.exe",
+                    "C:\\Program Files\\REAPER (x64)\\reaper.exe",
+                    "C:\\Program Files\\REAPER (arm64)\\reaper.exe",
+                    "C:\\Program Files\\REAPER\\reaper.exe",
+                    "C:\\Program Files (x86)\\REAPER\\reaper.exe",
+                }
+                for _, path in ipairs(possiblePaths) do
+                    local f = io.open(path, "r")
+                    if f then
+                        f:close()
+                        reaperPath = path
+                        break
+                    end
                 end
             end
         end
-        
+
         if reaperPath then
             local winRppPath = rppPath:gsub("/", "\\")
-            -- -nosplash: 不显示启动画面; -nonewinst: 不创建新实例窗口; start /B: 后台运行不抢焦点
-            local renderCmd = string.format('start /B "" "%s" -renderproject "%s" -nosplash -nonewinst', reaperPath, winRppPath)
+            -- Render through a Windows helper that launches a separate minimized
+            -- REAPER process and restores the user's foreground window, matching
+            -- the macOS focus-safe render helper behavior.
+            local helperPath = JoinPath(GetCurrentScriptDir(), "..", "scripts", "render_background_windows.vbs")
+            local renderCmd = string.format(
+                'wscript.exe //B //Nologo "%s" "%s" "%s"',
+                helperPath,
+                reaperPath,
+                winRppPath
+            )
             reaper.ShowConsoleMsg("渲染命令: " .. renderCmd .. "\n")
-            os.execute(renderCmd)
+            RunCommandHidden(renderCmd, 190000)
             reaper.ShowConsoleMsg("✓ 渲染已在后台启动\n")
+            BridgePhase("rendering preview: finished")
         else
             reaper.ShowConsoleMsg("⚠ 未找到 REAPER，请手动渲染\n")
+            BridgePhase("rendering preview: skipped no reaper")
         end
     end
     
