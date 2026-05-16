@@ -165,7 +165,7 @@ local function RunWindowsBackgroundRender(reaperPath, rppPath, helperDir, timeou
 end
 
 -- 跨平台创建目录（递归创建）
-function MakeDir(path)
+MakeDir = function(path)
     if not path or path == "" then
         return false
     end

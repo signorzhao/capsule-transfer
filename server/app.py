@@ -150,19 +150,40 @@ def _ps_single_quote(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def _windows_raise_window(titles: list[str], delay_ms: int = 500, attempts: int = 12):
+def _windows_raise_window(titles: list[str] | None = None, process_names: list[str] | None = None, delay_ms: int = 500, attempts: int = 12):
     if platform.system() != "Windows":
         return
+    titles = titles or []
+    process_names = process_names or []
     title_expr = "@(" + ",".join(_ps_single_quote(t) for t in titles if t) + ")"
-    if title_expr == "@()":
+    process_expr = "@(" + ",".join(_ps_single_quote(p) for p in process_names if p) + ")"
+    if title_expr == "@()" and process_expr == "@()":
         return
     script = (
         f"Start-Sleep -Milliseconds {int(delay_ms)}; "
+        "Add-Type @\"\n"
+        "using System;\n"
+        "using System.Runtime.InteropServices;\n"
+        "public class CapsuleWinFocus {\n"
+        "  [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);\n"
+        "  [DllImport(\"user32.dll\")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);\n"
+        "}\n"
+        "\"@; "
         "$wshell = New-Object -ComObject WScript.Shell; "
         f"$titles = {title_expr}; "
+        f"$processNames = {process_expr}; "
         f"for ($i = 0; $i -lt {int(attempts)}; $i++) {{ "
-        "foreach ($title in $titles) { "
-        "if ($wshell.AppActivate($title)) { exit 0 } "
+        "$procs = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }; "
+        "foreach ($p in $procs) { "
+        "$nameMatch = $processNames -contains $p.ProcessName; "
+        "$titleMatch = $false; "
+        "foreach ($title in $titles) { if ($p.MainWindowTitle -like \"*$title*\") { $titleMatch = $true; break } } "
+        "if ($nameMatch -or $titleMatch) { "
+        "[CapsuleWinFocus]::ShowWindowAsync($p.MainWindowHandle, 9) | Out-Null; "
+        "[CapsuleWinFocus]::SetForegroundWindow($p.MainWindowHandle) | Out-Null; "
+        "$wshell.AppActivate($p.Id) | Out-Null; "
+        "exit 0 "
+        "} "
         "} "
         "Start-Sleep -Milliseconds 250 "
         "}"
@@ -452,7 +473,7 @@ def open_capsule_rpp(cap_id: str):
             subprocess.Popen(["open", str(rpp_path)])
         elif platform.system() == "Windows":
             os.startfile(str(rpp_path))
-            _windows_raise_window(["REAPER", rpp_path.stem], delay_ms=700, attempts=16)
+            _windows_raise_window(["REAPER", rpp_path.stem], ["reaper"], delay_ms=700, attempts=20)
         else:
             subprocess.Popen(["xdg-open", str(rpp_path)])
     except Exception as e:
@@ -475,7 +496,7 @@ def open_capsule_folder(cap_id: str):
                 stderr=subprocess.DEVNULL,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-            _windows_raise_window([target.name, str(target), "File Explorer", "资源管理器"], delay_ms=350, attempts=16)
+            _windows_raise_window([target.name, str(target), "File Explorer", "资源管理器"], ["explorer"], delay_ms=350, attempts=20)
         else:
             subprocess.Popen(["xdg-open", str(target)])
     except Exception as e:
