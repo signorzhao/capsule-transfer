@@ -3,18 +3,20 @@
 -- Install once, then keep REAPER open/minimized while Capsule Transfer sends commands.
 
 local SECTION = "capsule_transfer"
-local BRIDGE_VERSION = "1.0.1"
+local BRIDGE_VERSION = "1.0.2"
 
 if _CAPSULE_TRANSFER_BRIDGE_RUNNING then
   return
 end
 _CAPSULE_TRANSFER_BRIDGE_RUNNING = true
 
+local function Phase(msg)
+  reaper.SetExtState(SECTION, "export_phase", tostring(msg or ""), false)
+end
+
 local ENABLE_CONSOLE = false
 local function Log(msg)
-  if ENABLE_CONSOLE then
-    reaper.ShowConsoleMsg("[CapsuleBridge] " .. tostring(msg) .. "\n")
-  end
+  if ENABLE_CONSOLE then reaper.ShowConsoleMsg("[CapsuleBridge] " .. tostring(msg) .. "\n") end
 end
 
 local function EscapeJsonString(s)
@@ -47,7 +49,9 @@ local function WriteJsonResult(success, request_id, capsule_name, error_msg, ext
     end
   end
   table.insert(parts, '}')
-  reaper.SetExtState(SECTION, "result", table.concat(parts), false)
+  local payload = table.concat(parts)
+  reaper.SetExtState(SECTION, "result", payload, false)
+  reaper.SetExtState(SECTION, "last_result_debug", payload, false)
 end
 
 local function ExtractJsonString(json, key)
@@ -107,6 +111,7 @@ local function SelectMainExportScript(cmd)
 end
 
 local function RunExport(cmd)
+  Phase("checking selected items")
   local selected = reaper.CountSelectedMediaItems(0)
   if selected == 0 then
     return false, nil, "没有选中的 Items。请在 REAPER 中选中要导出的音频 Items 后再捕获。", false
@@ -116,11 +121,6 @@ local function RunExport(cmd)
   local capsule_name = (cmd.capsule_type or "magic") .. "_" .. (cmd.username or "user") .. "_" .. timestamp
   local requested_preview = cmd.render_preview == true
 
-  -- In persistent bridge mode, REAPER may be minimized. main_export2.lua's current
-  -- preview path opens a render project tab and can block on render actions. To
-  -- keep the save-capsule path reliable and focus-safe, export the capsule first
-  -- and skip preview rendering here. Preview can be added later as a separate
-  -- async job after the non-destructive capsule export succeeds.
   _SYNEST_AUTO_EXPORT = {
     project_name = cmd.project_name or cmd.capsule_type or "magic",
     theme_name = cmd.theme_name or cmd.capsule_type or "magic",
@@ -131,14 +131,14 @@ local function RunExport(cmd)
   }
 
   local main_script = SelectMainExportScript(cmd)
-  Log("loading main export: " .. tostring(main_script))
-
+  Phase("loading main export script: " .. tostring(main_script))
   local main_export_func, load_err = loadfile(main_script)
   if not main_export_func then
     _SYNEST_AUTO_EXPORT = nil
     return false, nil, "无法加载主导出脚本: " .. tostring(load_err or main_script), requested_preview
   end
 
+  Phase("initializing main export script")
   local load_ok, load_result = pcall(main_export_func)
   if not load_ok then
     _SYNEST_AUTO_EXPORT = nil
@@ -150,6 +150,7 @@ local function RunExport(cmd)
     return false, nil, "主导出脚本未定义 main() 函数", requested_preview
   end
 
+  Phase("running main_export2 main()")
   local ok, r1, r2 = pcall(main)
   local final_capsule_name = _SYNEST_AUTO_EXPORT and _SYNEST_AUTO_EXPORT.capsule_name or capsule_name
   _SYNEST_AUTO_EXPORT = nil
@@ -158,6 +159,7 @@ local function RunExport(cmd)
     return false, nil, "导出异常: " .. tostring(r1), requested_preview
   end
   if r1 == true then
+    Phase("main_export2 returned success")
     return true, final_capsule_name, nil, requested_preview
   end
 
@@ -178,17 +180,22 @@ local function HandleCommand(raw)
   end
 
   reaper.SetExtState(SECTION, "status", "exporting", false)
+  Phase("bridge received export command")
   local ok, capsule_name, err, preview_requested = RunExport(cmd)
   reaper.SetExtState(SECTION, "status", "idle", false)
   if ok then
+    Phase("writing bridge success result")
     WriteJsonResult(true, cmd.request_id, capsule_name, nil, {
       mode = "bridge",
       preview_requested = preview_requested == true,
       preview_rendered = false,
       preview_note = preview_requested and "Bridge mode skipped preview render to avoid blocking REAPER while minimized" or "preview disabled",
     })
+    Phase("idle")
   else
+    Phase("writing bridge error result")
     WriteJsonResult(false, cmd.request_id, nil, err, { mode = "bridge" })
+    Phase("idle")
   end
 end
 
@@ -203,6 +210,7 @@ local function Poll()
     if not ok then
       local request_id = ExtractJsonString(raw, "request_id") or ""
       reaper.SetExtState(SECTION, "status", "idle", false)
+      Phase("bridge pcall error")
       WriteJsonResult(false, request_id, nil, "bridge 执行失败: " .. tostring(err), { mode = "bridge" })
     end
   end
@@ -211,4 +219,5 @@ local function Poll()
 end
 
 reaper.SetExtState(SECTION, "status", "idle", false)
+Phase("idle")
 Poll()
