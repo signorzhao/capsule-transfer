@@ -15,6 +15,7 @@ import {
   Play,
   Pause,
   FolderOpen,
+  Music,
   Pencil,
   Check,
   X,
@@ -62,18 +63,6 @@ function parseHostPort(value) {
     return { ip: raw, port: '' };
   }
   return { ip: match[1].replace(/^\[|\]$/g, ''), port: String(portNumber) };
-}
-
-function ReaperIcon({ size = 16, className = '' }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" className={className} aria-hidden="true">
-      <circle cx="12" cy="12" r="9.2" fill="none" stroke="currentColor" strokeWidth="2.2" />
-      <circle cx="12" cy="12" r="4.1" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path d="M4.8 8.4C8.2 7 12.2 7.5 15 9.8" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      <path d="M13.7 12.8l6.1 4.4" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" />
-      <circle cx="12" cy="12" r="1.25" fill="currentColor" />
-    </svg>
-  );
 }
 
 function Shell() {
@@ -474,7 +463,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRename, onOpenRpp
                 <div className="text-xs text-slate-500 mt-1 flex space-x-3"><span>{formatDate(cap.created_at)}</span><span>{formatBytes(cap.size_bytes)}</span>{cap.source_peer && <span className="text-emerald-500/80">来自 {cap.source_peer}</span>}</div>
               </div>
               <button onClick={() => startRename(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-indigo-400"><Pencil size={15} /></button>
-              <button title="打开 RPP 工程" onClick={() => onOpenRpp(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-orange-400"><ReaperIcon size={16} /></button>
+              <button title="打开 RPP 工程" onClick={() => onOpenRpp(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-orange-400"><Music size={16} /></button>
               <button title="打开胶囊文件夹" onClick={() => onOpenFolder(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-amber-400"><FolderOpen size={16} /></button>
               <button onClick={() => onSend(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 bg-indigo-600/10 text-indigo-400 rounded-lg hover:bg-indigo-600 hover:text-white"><Send size={16} /></button>
               {deleteConfirmId === cap.id ? (
