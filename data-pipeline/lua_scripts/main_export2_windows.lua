@@ -3193,9 +3193,10 @@ function ExportCapsule()
             -- Render through a Windows helper that launches a separate minimized
             -- REAPER process and restores the user's foreground window, matching
             -- the macOS focus-safe render helper behavior.
-            RewriteRppRenderOutputToCurrentDir(rppPath, capsuleName)
-            RunWindowsBackgroundRender(reaperPath, rppPath, outputDir, 190000)
-            reaper.ShowConsoleMsg("✓ 渲染已在后台启动\n")
+            local rewriteOk = RewriteRppRenderOutputToCurrentDir(rppPath, capsuleName)
+            local renderResult = RunWindowsBackgroundRender(reaperPath, rppPath, outputDir, 190000)
+            reaper.SetExtState("capsule_transfer", "preview_render_debug", "reaper=" .. tostring(reaperPath) .. "; rpp=" .. tostring(rppPath) .. "; output_dir=" .. tostring(outputDir) .. "; rewrite_ok=" .. tostring(rewriteOk) .. "; result=" .. tostring(renderResult), false)
+            reaper.ShowConsoleMsg("✓ 渲染命令已完成，返回: " .. tostring(renderResult) .. "\n")
             BridgePhase("rendering preview: finished")
         else
             reaper.ShowConsoleMsg("⚠ 未找到 REAPER，请手动渲染\n")

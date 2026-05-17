@@ -3,7 +3,7 @@
 -- Install once, then keep REAPER open/minimized while Capsule Transfer sends commands.
 
 local SECTION = "capsule_transfer"
-local BRIDGE_VERSION = "1.0.5"
+local BRIDGE_VERSION = "1.0.6"
 local HEARTBEAT_STALE_SECONDS = 15
 local COMMAND_KEY = "command_v2"
 local RESULT_KEY = "result_v2"
@@ -167,10 +167,12 @@ end
 
 local function SleepSeconds(seconds)
   seconds = tonumber(seconds) or 1
-  if package.config:sub(1,1) == "\\" then
-    os.execute("ping -n " .. tostring(math.max(2, math.floor(seconds) + 1)) .. " 127.0.0.1 > nul")
-  else
-    os.execute("sleep " .. tostring(math.max(1, math.floor(seconds))))
+  local started = reaper.time_precise and reaper.time_precise() or os.clock()
+  while true do
+    local now = reaper.time_precise and reaper.time_precise() or os.clock()
+    if now - started >= seconds then
+      return
+    end
   end
 end
 
@@ -356,6 +358,7 @@ local function HandleCommand(raw)
   if ok then
     Phase("writing bridge success result")
     local preview_debug = reaper.GetExtState(SECTION, "preview_search_debug") or ""
+    local render_debug = reaper.GetExtState(SECTION, "preview_render_debug") or ""
     WriteJsonResult(true, cmd.request_id, capsule_name, nil, {
       mode = "bridge",
       preview_requested = preview_requested == true,
@@ -363,6 +366,7 @@ local function HandleCommand(raw)
       preview_audio = preview_audio or "",
       preview_note = preview_requested and ((preview_rendered == true) and "preview rendered" or "preview requested but output file was not found") or "preview disabled",
       preview_debug = preview_debug,
+      render_debug = render_debug,
     })
     Phase("idle")
   else
