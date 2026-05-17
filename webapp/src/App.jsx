@@ -570,6 +570,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRename, onOpenRpp
                   <div className="flex items-center space-x-2"><input autoFocus value={editName} onChange={(e) => setEditName(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') confirmRename(cap); if (e.key === 'Escape') setEditingId(null); }} className="flex-1 bg-[#0f1115] border border-indigo-500 rounded px-2 py-1 text-sm text-slate-200" /><button onClick={() => confirmRename(cap)} className="p-1 text-emerald-400"><Check size={16} /></button><button onClick={() => setEditingId(null)} className="p-1 text-slate-500"><X size={16} /></button></div>
                 ) : <h3 className="font-medium text-slate-200 truncate cursor-pointer hover:text-indigo-300" onDoubleClick={() => startRename(cap)}>{cap.name}</h3>}
                 <div className="text-xs text-slate-500 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1"><span>{formatDate(cap.created_at)}</span><span>{formatBytes(cap.size_bytes)}</span><PluginStatusBadge status={cap.plugin_status} />{cap.source_peer && <span className="text-emerald-500/80">来自 {cap.source_peer}</span>}</div>
+                <MissingPluginPreview status={cap.plugin_status} />
               </div>
               <button onClick={() => startRename(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-indigo-400"><Pencil size={15} /></button>
               <button title="打开 RPP 工程" onClick={() => onOpenRpp(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-orange-400"><Music size={16} /></button>
@@ -616,6 +617,24 @@ function PluginStatusBadge({ status }) {
     <span title={`已匹配 ${status.available}/${status.total} 个插件`} className="inline-flex items-center rounded border border-emerald-500/25 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
       插件完整
     </span>
+  );
+}
+
+function MissingPluginPreview({ status }) {
+  const missing = status?.missing_plugins || [];
+  if (!status?.inventory_available || !missing.length) return null;
+  const shown = missing.slice(0, 3);
+  const extra = Math.max(0, missing.length - shown.length);
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+      <span className="text-[10px] text-amber-300/80">缺失</span>
+      {shown.map((name) => (
+        <span key={name} title={name} className="max-w-[180px] truncate rounded border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-200">
+          {name}
+        </span>
+      ))}
+      {extra > 0 && <span className="text-[10px] text-slate-500">+{extra}</span>}
+    </div>
   );
 }
 

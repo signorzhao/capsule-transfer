@@ -349,10 +349,17 @@ def _get_dir_ctime(d: Path) -> str:
 def _normalize_plugin_name(name: str) -> str:
     text = str(name or "").lower()
     text = re.sub(r"^(vst3i?|vsti?|clap|aui?|js|dxi?)\s*:\s*", "", text)
+    text = re.sub(r"^[a-z0-9]+\s*:\s*", "", text)
     text = re.sub(r"\.(dll|vst3|vst|component|clap|so|dylib)$", "", text)
-    text = re.sub(r"\s*\([^)]*\)\s*$", "", text)
+    text = re.sub(r"\([^)]*\)", " ", text)
+    text = re.sub(r"\b(mono|stereo|x64|x86|vst3?|au|clap|component|plugin|effect|instrument)\b", " ", text)
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _plugin_tokens(name: str) -> set[str]:
+    normalized = _normalize_plugin_name(name)
+    return {token for token in normalized.split() if len(token) >= 3 and not token.isdigit()}
 
 
 def _reaper_resource_candidates() -> list[Path]:
@@ -437,9 +444,15 @@ def _plugin_available(required_name: str, installed: set[str]) -> bool:
         return True
     if normalized in installed:
         return True
+    required_tokens = _plugin_tokens(required_name)
     for name in installed:
         if len(normalized) >= 4 and (normalized in name or name in normalized):
             return True
+        installed_tokens = _plugin_tokens(name)
+        if required_tokens and installed_tokens:
+            overlap = required_tokens & installed_tokens
+            if len(overlap) >= min(2, len(required_tokens)):
+                return True
     return False
 
 
@@ -461,12 +474,14 @@ def _capsule_plugin_status(plugin_list: list) -> dict:
         return {"total": len(unique_required), "available": 0, "missing": 0, "unknown": len(unique_required), "missing_plugins": [], "inventory_available": False}
 
     missing = [name for name in unique_required if not _plugin_available(name, installed)]
+    present = [name for name in unique_required if name not in missing]
     return {
         "total": len(unique_required),
         "available": len(unique_required) - len(missing),
         "missing": len(missing),
         "unknown": 0,
-        "missing_plugins": missing[:20],
+        "missing_plugins": missing,
+        "present_plugins": present[:20],
         "inventory_available": True,
         "inventory_count": int(inventory.get("count") or 0),
     }
