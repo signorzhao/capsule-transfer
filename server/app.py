@@ -41,6 +41,8 @@ CONTACTS_FILE = DATA_DIR / "contacts.json"
 CONFIG_FILE = APP_DIR / "config.json"
 
 CAPSULES_DIR.mkdir(parents=True, exist_ok=True)
+os.environ["CAPSULE_TRANSFER_EXPORT_DIR"] = str(CAPSULES_DIR)
+os.environ["SYNESTH_CAPSULE_OUTPUT"] = str(CAPSULES_DIR)
 
 # 引用 data-pipeline 中的 Reaper 导出模块。
 _DATA_PIPELINE = APP_DIR / "data-pipeline"
@@ -674,6 +676,7 @@ def webui_export():
     render_preview = data.get("render_preview", True)
     webui_port = int(data.get("webui_port", 9000))
     export_dir = str(CAPSULES_DIR)
+    os.environ["CAPSULE_TRANSFER_EXPORT_DIR"] = export_dir
     os.environ["SYNESTH_CAPSULE_OUTPUT"] = export_dir
 
     logger.info("Reaper bridge export: type=%s preview=%s dir=%s", capsule_type, render_preview, export_dir)
@@ -795,6 +798,55 @@ def webui_export():
         logger.warning("Reaper 导出成功但未能自动入库: %s", expected_name)
 
     return _ok(resp_data, message="导出完成")
+
+
+@app.route("/api/reaper/bridge/status", methods=["GET"])
+def reaper_bridge_status():
+    webui_port = int(request.args.get("webui_port") or load_config().get("webui_port", 9000))
+    try:
+        from exporters.reaper_bridge_client import ReaperBridgeClient
+        client = ReaperBridgeClient(port=webui_port)
+        status = client.status().as_dict()
+        try:
+            diagnostics = json.loads(client._diagnostics())
+        except Exception:
+            diagnostics = {}
+    except Exception as exc:
+        status = {"webui_available": False, "bridge_available": False, "error": str(exc)}
+        diagnostics = {}
+
+    path_manager = {}
+    try:
+        pm = PathManager.get_instance()
+        path_manager = {
+            "export_dir": str(pm.export_dir),
+            "resource_dir": str(pm.resource_dir),
+            "lua_scripts_dir": str(pm.lua_scripts_dir),
+        }
+    except Exception:
+        pass
+
+    status.update(diagnostics)
+    status.update({
+        "app_dir": str(APP_DIR),
+        "data_dir": str(DATA_DIR),
+        "capsules_dir": str(CAPSULES_DIR),
+        "data_pipeline_dir": str(_DATA_PIPELINE),
+        "path_manager": path_manager,
+        "env_export_dir": os.environ.get("CAPSULE_TRANSFER_EXPORT_DIR", ""),
+    })
+    return _ok(status)
+
+
+@app.route("/api/reaper/bridge/ping", methods=["GET"])
+def reaper_bridge_ping():
+    webui_port = int(request.args.get("webui_port") or load_config().get("webui_port", 9000))
+    try:
+        from exporters.reaper_bridge_client import ReaperBridgeClient
+        result = ReaperBridgeClient(port=webui_port).ping()
+        return _ok(result)
+    except Exception as exc:
+        return _err(str(exc), 500)
 
 
 # ---------------------- 联系人 ----------------------
@@ -1050,7 +1102,7 @@ def p2p_send():
                 "capsule_type": cap.get("capsule_type"),
                 "size_bytes": len(blob),
             },
-            timeout=5,
+            timeout=15,
         )
         req_body = req_resp.json()
     except Exception as e:

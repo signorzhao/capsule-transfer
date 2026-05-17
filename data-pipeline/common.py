@@ -36,36 +36,41 @@ class PathManager:
         # 默认使用 CLI 传入的 export_dir
         self.export_dir = export_dir
         
-        # 尝试从 config.json 读取用户自定义路径
-        # 🔴 优先从系统配置目录读取（生产环境），如果不存在则从 config_dir 读取（开发环境）
-        import sys
-        
-        config_locations = []
-        
-        # Windows: %APPDATA%\com.soundcapsule.app\config.json
-        if sys.platform == 'win32':
-            appdata = os.environ.get('APPDATA', Path.home() / 'AppData' / 'Roaming')
-            config_locations.append(Path(appdata) / "com.soundcapsule.app" / "config.json")
-        
-        # macOS: ~/Library/Application Support/com.soundcapsule.app/config.json
-        config_locations.append(Path.home() / "Library/Application Support/com.soundcapsule.app/config.json")
-        
-        # 通用: config_dir/config.json
-        config_locations.append(self.config_dir / "config.json")
-        
-        for config_file in config_locations:
-            try:
-                if config_file.exists():
-                    with open(config_file, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        user_export = data.get('export_dir')
-                        if user_export:
-                            print(f"🔄 [PathManager] 从配置加载用户导出路径: {user_export}")
-                            print(f"   配置文件: {config_file}")
-                            self.export_dir = Path(user_export)
-                            break  # 找到配置就停止
-            except Exception as e:
-                continue  # 尝试下一个位置
+        forced_export = os.environ.get("CAPSULE_TRANSFER_EXPORT_DIR") or os.environ.get("SYNESTH_CAPSULE_OUTPUT")
+        if forced_export:
+            print(f"🔄 [PathManager] 使用运行时导出路径: {forced_export}")
+            self.export_dir = Path(forced_export)
+        else:
+            # 尝试从 config.json 读取用户自定义路径
+            # 🔴 优先从系统配置目录读取（生产环境），如果不存在则从 config_dir 读取（开发环境）
+            import sys
+
+            config_locations = []
+
+            # Windows: %APPDATA%\com.soundcapsule.app\config.json
+            if sys.platform == 'win32':
+                appdata = os.environ.get('APPDATA', Path.home() / 'AppData' / 'Roaming')
+                config_locations.append(Path(appdata) / "com.soundcapsule.app" / "config.json")
+
+            # macOS: ~/Library/Application Support/com.soundcapsule.app/config.json
+            config_locations.append(Path.home() / "Library/Application Support/com.soundcapsule.app/config.json")
+
+            # 通用: config_dir/config.json
+            config_locations.append(self.config_dir / "config.json")
+
+            for config_file in config_locations:
+                try:
+                    if config_file.exists():
+                        with open(config_file, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                            user_export = data.get('export_dir')
+                            if user_export:
+                                print(f"🔄 [PathManager] 从配置加载用户导出路径: {user_export}")
+                                print(f"   配置文件: {config_file}")
+                                self.export_dir = Path(user_export)
+                                break  # 找到配置就停止
+                except Exception as e:
+                    continue  # 尝试下一个位置
         
         if self.export_dir == export_dir:
             print(f"⚠️ [PathManager] 未找到用户配置，使用默认导出路径: {export_dir}")
