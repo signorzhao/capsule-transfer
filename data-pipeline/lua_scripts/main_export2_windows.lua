@@ -180,8 +180,16 @@ local function RewriteRppRenderOutputToCurrentDir(rppPath, renderPattern)
     f:close()
 
     local normalizedDir = rppDir:gsub("\\", "/")
-    content = content:gsub("RENDER_FILE%s+[^\n\r]*[\r]?\n?", "")
-    content = content:gsub("RENDER_PATTERN%s+[^\n\r]*[\r]?\n?", "")
+
+    -- REAPER may keep render settings with indentation or quoted paths. Remove
+    -- every existing project-level render output line before inserting the
+    -- capsule-local directory, otherwise -renderproject can write to a stale
+    -- portable folder saved inside the RPP.
+    content = content:gsub("[ \t]*RENDER_FILE%s+[^\n\r]*[\r]?\n", "")
+    content = content:gsub("[ \t]*RENDER_FILE%s+[^\n\r]*$", "")
+    content = content:gsub("[ \t]*RENDER_PATTERN%s+[^\n\r]*[\r]?\n", "")
+    content = content:gsub("[ \t]*RENDER_PATTERN%s+[^\n\r]*$", "")
+
     local settings = string.format("RENDER_FILE %s\nRENDER_PATTERN %s\n", normalizedDir, renderPattern or "")
     local replaced = false
     content = content:gsub("(<REAPER_PROJECT[^\n\r]*[\r]?\n)", function(header)
@@ -198,6 +206,7 @@ local function RewriteRppRenderOutputToCurrentDir(rppPath, renderPattern)
     end
     wf:write(content)
     wf:close()
+    reaper.ShowConsoleMsg("✓ RPP渲染输出目录已更新: " .. normalizedDir .. "\n")
     return true
 end
 
@@ -3128,6 +3137,8 @@ function ExportCapsule()
         reaper.ShowConsoleMsg("✗ RPP 生成失败\n")
         return false
     end
+
+    RewriteRppRenderOutputToCurrentDir(rppPath, capsuleName)
     
     -- 步骤 4：生成 metadata.json
     BridgePhase("saving capsule: writing metadata")
