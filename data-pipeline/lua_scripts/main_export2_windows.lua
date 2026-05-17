@@ -164,6 +164,11 @@ local function RunWindowsBackgroundRender(reaperPath, rppPath, helperDir, timeou
     return RunCommandHidden(fallbackCmd, timeoutMs or 190000)
 end
 
+local function QuoteRppValue(value)
+    value = tostring(value or ""):gsub("\\", "/"):gsub('"', '\\"')
+    return '"' .. value .. '"'
+end
+
 local function RewriteRppRenderOutputToCurrentDir(rppPath, renderPattern)
     if not rppPath or rppPath == "" then
         return false
@@ -190,7 +195,7 @@ local function RewriteRppRenderOutputToCurrentDir(rppPath, renderPattern)
     content = content:gsub("[ \t]*RENDER_PATTERN%s+[^\n\r]*[\r]?\n", "")
     content = content:gsub("[ \t]*RENDER_PATTERN%s+[^\n\r]*$", "")
 
-    local settings = string.format("RENDER_FILE %s\nRENDER_PATTERN %s\n", normalizedDir, renderPattern or "")
+    local settings = string.format("RENDER_FILE %s\nRENDER_PATTERN %s\n", QuoteRppValue(normalizedDir), QuoteRppValue(renderPattern or ""))
     local replaced = false
     content = content:gsub("(<REAPER_PROJECT[^\n\r]*[\r]?\n)", function(header)
         replaced = true
@@ -1647,7 +1652,7 @@ RENDER_FMT 0 2 44100
 RENDER_RANGE 2 %.6f %.6f 0 1000
 RENDER_STEMS 0
 RENDER_1X %d
-]], renderDir, capsuleName, actualStartTime, actualEndTime, render1x)
+]], QuoteRppValue(renderDir), QuoteRppValue(capsuleName), actualStartTime, actualEndTime, render1x)
         
         -- 在 REAPER_PROJECT 行后插入渲染设置
         content = content:gsub('(<REAPER_PROJECT[^\n]*\n)', '%1' .. renderSettings)
@@ -2542,7 +2547,7 @@ function FixRPPRenderSettings(rppPath, outputPath, startTime, endTime, capsuleNa
     end
     
     -- 关键发现：Reaper 命令行渲染需要使用特定的格式
-    -- 1. RENDER_FILE 必须指向目录（不带引号）
+    -- 1. RENDER_FILE 必须指向目录；路径包含空格时必须加引号
     -- 2. 必须有 RENDER_PATTERN $project_preview
     -- 3. RENDER_STEMS 必须是 0（不是 136）
 
@@ -2639,7 +2644,7 @@ RENDER_FMT 0 2 44100
 RENDER_RANGE 2 %.6f %.6f 0 1000
 RENDER_STEMS 0
 RENDER_1X %d
-]], outputDir_for_render, baseName, startTime, endTime, render1x)
+]], QuoteRppValue(outputDir_for_render), QuoteRppValue(baseName), startTime, endTime, render1x)
 
     -- 在 <REAPER_PROJECT> 行后插入渲染设置
     content = string.gsub(content, '(<REAPER_PROJECT[^\n]*\n)', '%1' .. renderSettings)
