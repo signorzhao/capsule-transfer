@@ -569,7 +569,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRename, onOpenRpp
                 {editingId === cap.id ? (
                   <div className="flex items-center space-x-2"><input autoFocus value={editName} onChange={(e) => setEditName(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') confirmRename(cap); if (e.key === 'Escape') setEditingId(null); }} className="flex-1 bg-[#0f1115] border border-indigo-500 rounded px-2 py-1 text-sm text-slate-200" /><button onClick={() => confirmRename(cap)} className="p-1 text-emerald-400"><Check size={16} /></button><button onClick={() => setEditingId(null)} className="p-1 text-slate-500"><X size={16} /></button></div>
                 ) : <h3 className="font-medium text-slate-200 truncate cursor-pointer hover:text-indigo-300" onDoubleClick={() => startRename(cap)}>{cap.name}</h3>}
-                <div className="text-xs text-slate-500 mt-1 flex space-x-3"><span>{formatDate(cap.created_at)}</span><span>{formatBytes(cap.size_bytes)}</span>{cap.source_peer && <span className="text-emerald-500/80">来自 {cap.source_peer}</span>}</div>
+                <div className="text-xs text-slate-500 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1"><span>{formatDate(cap.created_at)}</span><span>{formatBytes(cap.size_bytes)}</span><PluginStatusBadge status={cap.plugin_status} />{cap.source_peer && <span className="text-emerald-500/80">来自 {cap.source_peer}</span>}</div>
               </div>
               <button onClick={() => startRename(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-indigo-400"><Pencil size={15} /></button>
               <button title="打开 RPP 工程" onClick={() => onOpenRpp(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-orange-400"><Music size={16} /></button>
@@ -588,6 +588,34 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRename, onOpenRpp
         </div>
       )}
     </div>
+  );
+}
+
+function PluginStatusBadge({ status }) {
+  if (!status || !status.total) return null;
+  if (!status.inventory_available) {
+    return (
+      <span title="未找到 REAPER 插件索引，暂时无法判断插件是否完整。" className="inline-flex items-center rounded border border-slate-700/70 bg-slate-800/40 px-1.5 py-0.5 text-[10px] text-slate-400">
+        插件待检测
+      </span>
+    );
+  }
+  if (status.missing > 0) {
+    const missing = status.missing_plugins || [];
+    const extra = Math.max(0, status.missing - missing.length);
+    const title = missing.length
+      ? `缺失插件：${missing.join('、')}${extra ? ` 等 ${status.missing} 个` : ''}`
+      : `缺失 ${status.missing} 个插件`;
+    return (
+      <span title={title} className="inline-flex items-center rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">
+        缺失 {status.missing} 个插件
+      </span>
+    );
+  }
+  return (
+    <span title={`已匹配 ${status.available}/${status.total} 个插件`} className="inline-flex items-center rounded border border-emerald-500/25 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
+      插件完整
+    </span>
   );
 }
 

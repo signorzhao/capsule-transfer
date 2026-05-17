@@ -98,6 +98,8 @@ _pending_lock = threading.Lock()
 _PENDING_TIMEOUT = 60
 _sse_subscribers: list = []
 _sse_lock = threading.Lock()
+_plugin_inventory_cache: dict = {"expires_at": 0.0, "data": None}
+_plugin_inventory_lock = threading.Lock()
 
 app = Flask(__name__, static_folder=None)
 
@@ -264,7 +266,11 @@ def _read_manifest(capsule_dir: Path) -> dict | None:
         if meta.exists():
             try:
                 raw = json.loads(meta.read_text("utf-8"))
-                return {"capsule": raw, "tags": [], "metadata": raw.get("info", {})}
+                plugins = raw.get("plugins") or {}
+                metadata = raw.get("info", {}) or {}
+                metadata["plugin_count"] = plugins.get("count", 0)
+                metadata["plugin_list"] = plugins.get("list", [])
+                return {"capsule": raw, "tags": [], "metadata": metadata}
             except Exception:
                 return None
         return None
@@ -340,13 +346,141 @@ def _get_dir_ctime(d: Path) -> str:
         return ""
 
 
+def _normalize_plugin_name(name: str) -> str:
+    text = str(name or "").lower()
+    text = re.sub(r"^(vst3i?|vsti?|clap|aui?|js|dxi?)\s*:\s*", "", text)
+    text = re.sub(r"\.(dll|vst3|vst|component|clap|so|dylib)$", "", text)
+    text = re.sub(r"\s*\([^)]*\)\s*$", "", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _reaper_resource_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    system = platform.system()
+    if system == "Windows":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            candidates.append(Path(appdata) / "REAPER")
+    elif system == "Darwin":
+        candidates.append(Path.home() / "Library" / "Application Support" / "REAPER")
+    else:
+        candidates.extend([Path.home() / ".config" / "REAPER", Path.home() / ".reaper"])
+
+    cfg = load_config()
+    configured = cfg.get("reaper_resource_path")
+    if configured:
+        candidates.insert(0, Path(configured))
+
+    unique: list[Path] = []
+    seen = set()
+    for path in candidates:
+        key = str(path)
+        if key not in seen:
+            unique.append(path)
+            seen.add(key)
+    return unique
+
+
+def _parse_vstplugins_ini(path: Path) -> set[str]:
+    names: set[str] = set()
+    try:
+        lines = path.read_text("utf-8", errors="ignore").splitlines()
+    except Exception:
+        return names
+
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("[") or line.startswith(";") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key_name = Path(key.strip()).stem
+        for candidate in [key_name, *re.split(r"[,!]+", value)]:
+            normalized = _normalize_plugin_name(candidate)
+            if normalized and len(normalized) > 1:
+                names.add(normalized)
+    return names
+
+
+def _load_plugin_inventory() -> dict:
+    now = time.time()
+    with _plugin_inventory_lock:
+        cached = _plugin_inventory_cache.get("data")
+        if cached and now < float(_plugin_inventory_cache.get("expires_at", 0)):
+            return cached
+
+        plugin_names: set[str] = set()
+        files: list[str] = []
+        for resource_dir in _reaper_resource_candidates():
+            if not resource_dir.exists():
+                continue
+            for ini in sorted(resource_dir.glob("reaper-vstplugins*.ini")):
+                parsed = _parse_vstplugins_ini(ini)
+                if parsed:
+                    plugin_names.update(parsed)
+                    files.append(str(ini))
+
+        data = {
+            "available": bool(files),
+            "plugin_names": plugin_names,
+            "files": files,
+            "count": len(plugin_names),
+        }
+        _plugin_inventory_cache["data"] = data
+        _plugin_inventory_cache["expires_at"] = now + 60
+        return data
+
+
+def _plugin_available(required_name: str, installed: set[str]) -> bool:
+    normalized = _normalize_plugin_name(required_name)
+    if not normalized:
+        return True
+    if normalized in installed:
+        return True
+    for name in installed:
+        if len(normalized) >= 4 and (normalized in name or name in normalized):
+            return True
+    return False
+
+
+def _capsule_plugin_status(plugin_list: list) -> dict:
+    required = [str(p).strip() for p in (plugin_list or []) if str(p).strip()]
+    unique_required = []
+    seen = set()
+    for name in required:
+        key = _normalize_plugin_name(name)
+        if key and key not in seen:
+            unique_required.append(name)
+            seen.add(key)
+
+    inventory = _load_plugin_inventory()
+    installed = inventory.get("plugin_names") or set()
+    if not unique_required:
+        return {"total": 0, "available": 0, "missing": 0, "unknown": 0, "missing_plugins": [], "inventory_available": bool(inventory.get("available"))}
+    if not inventory.get("available"):
+        return {"total": len(unique_required), "available": 0, "missing": 0, "unknown": len(unique_required), "missing_plugins": [], "inventory_available": False}
+
+    missing = [name for name in unique_required if not _plugin_available(name, installed)]
+    return {
+        "total": len(unique_required),
+        "available": len(unique_required) - len(missing),
+        "missing": len(missing),
+        "unknown": 0,
+        "missing_plugins": missing[:20],
+        "inventory_available": True,
+        "inventory_count": int(inventory.get("count") or 0),
+    }
+
+
 def _capsule_from_dir(capsule_dir: Path) -> dict | None:
     manifest = _read_manifest(capsule_dir)
     if not manifest:
         return None
     cap = manifest.get("capsule") or {}
     uuid = cap.get("uuid") or capsule_dir.name
-    return {
+    metadata = manifest.get("metadata") or {}
+    plugin_list = metadata.get("plugin_list") or ((metadata.get("plugins") or {}).get("list") if isinstance(metadata.get("plugins"), dict) else None) or []
+    result = {
         "id": uuid,
         "uuid": uuid,
         "name": cap.get("name") or capsule_dir.name,
@@ -360,8 +494,10 @@ def _capsule_from_dir(capsule_dir: Path) -> dict | None:
         "size_bytes": _dir_size(capsule_dir),
         "created_at": cap.get("created_at") or _get_dir_ctime(capsule_dir),
         "tags": manifest.get("tags", []),
-        "metadata": manifest.get("metadata", {}),
+        "metadata": metadata,
     }
+    result["plugin_status"] = _capsule_plugin_status(plugin_list)
+    return result
 
 
 def scan_capsules(q: str | None = None) -> list[dict]:
