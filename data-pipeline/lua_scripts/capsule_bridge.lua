@@ -3,7 +3,7 @@
 -- Install once, then keep REAPER open/minimized while Capsule Transfer sends commands.
 
 local SECTION = "capsule_transfer"
-local BRIDGE_VERSION = "1.0.4"
+local BRIDGE_VERSION = "1.0.5"
 local HEARTBEAT_STALE_SECONDS = 15
 local COMMAND_KEY = "command_v2"
 local RESULT_KEY = "result_v2"
@@ -165,6 +165,93 @@ local function FileExists(path)
   return false
 end
 
+local function SleepSeconds(seconds)
+  seconds = tonumber(seconds) or 1
+  if package.config:sub(1,1) == "\\" then
+    os.execute("ping -n " .. tostring(math.max(2, math.floor(seconds) + 1)) .. " 127.0.0.1 > nul")
+  else
+    os.execute("sleep " .. tostring(math.max(1, math.floor(seconds))))
+  end
+end
+
+local function IsPreviewAudioFile(name)
+  local lower = tostring(name or ""):lower()
+  return lower:match("%.ogg$") or lower:match("%.wav$") or lower:match("%.mp3$") or lower:match("%.flac$")
+end
+
+local function ListDirectoryFiles(dir)
+  local files = {}
+  if reaper.EnumerateFiles then
+    local i = 0
+    while i < 500 do
+      local name = reaper.EnumerateFiles(dir, i)
+      if not name then break end
+      table.insert(files, name)
+      i = i + 1
+    end
+  end
+  return files
+end
+
+local function JoinFilesForDebug(files)
+  if not files or #files == 0 then return "" end
+  local parts = {}
+  for i, name in ipairs(files) do
+    if i > 30 then
+      table.insert(parts, "...")
+      break
+    end
+    table.insert(parts, tostring(name))
+  end
+  return table.concat(parts, ", ")
+end
+
+local function FindPreviewAudio(capsule_dir, capsule_name)
+  local candidates = {
+    capsule_name .. ".ogg",
+    capsule_name .. ".wav",
+    capsule_name .. ".mp3",
+    capsule_name .. ".flac",
+  }
+  for _, name in ipairs(candidates) do
+    if FileExists(JoinPath(capsule_dir, name)) then
+      return name
+    end
+  end
+
+  local files = ListDirectoryFiles(capsule_dir)
+  local prefix = tostring(capsule_name or ""):lower()
+  local fallback = ""
+  for _, name in ipairs(files) do
+    if IsPreviewAudioFile(name) then
+      local lower = tostring(name):lower()
+      if lower == (prefix .. ".ogg") or lower == (prefix .. ".wav") then
+        return name
+      end
+      if lower:sub(1, #prefix) == prefix then
+        return name
+      end
+      if fallback == "" then
+        fallback = name
+      end
+    end
+  end
+  return fallback
+end
+
+local function WaitForPreviewAudio(capsule_dir, capsule_name, timeout_seconds)
+  local deadline = os.time() + (timeout_seconds or 12)
+  local found = ""
+  while os.time() <= deadline do
+    found = FindPreviewAudio(capsule_dir, capsule_name)
+    if found and found ~= "" then
+      return found
+    end
+    SleepSeconds(1)
+  end
+  return ""
+end
+
 local function ScriptDir()
   local src = debug.getinfo(1).source or ""
   local path = src:match("@(.*)$") or src
@@ -232,18 +319,17 @@ local function RunExport(cmd)
     Phase("main_export2 returned success")
     local preview_rendered = false
     local preview_audio = ""
+    local preview_debug = ""
     if requested_preview and cmd.export_dir and final_capsule_name then
+      Phase("checking preview output")
       local capsule_dir = JoinPath(cmd.export_dir, final_capsule_name)
-      local ogg_name = final_capsule_name .. ".ogg"
-      local wav_name = final_capsule_name .. ".wav"
-      if FileExists(JoinPath(capsule_dir, ogg_name)) then
+      preview_audio = WaitForPreviewAudio(capsule_dir, final_capsule_name, 12)
+      if preview_audio and preview_audio ~= "" then
         preview_rendered = true
-        preview_audio = ogg_name
-      elseif FileExists(JoinPath(capsule_dir, wav_name)) then
-        preview_rendered = true
-        preview_audio = wav_name
       end
+      preview_debug = "dir=" .. capsule_dir .. "; files=" .. JoinFilesForDebug(ListDirectoryFiles(capsule_dir))
     end
+    reaper.SetExtState(SECTION, "preview_search_debug", preview_debug, false)
     return true, final_capsule_name, nil, requested_preview, preview_rendered, preview_audio
   end
 
@@ -269,12 +355,14 @@ local function HandleCommand(raw)
   reaper.SetExtState(SECTION, "status", "idle", false)
   if ok then
     Phase("writing bridge success result")
+    local preview_debug = reaper.GetExtState(SECTION, "preview_search_debug") or ""
     WriteJsonResult(true, cmd.request_id, capsule_name, nil, {
       mode = "bridge",
       preview_requested = preview_requested == true,
       preview_rendered = preview_rendered == true,
       preview_audio = preview_audio or "",
       preview_note = preview_requested and ((preview_rendered == true) and "preview rendered" or "preview requested but output file was not found") or "preview disabled",
+      preview_debug = preview_debug,
     })
     Phase("idle")
   else

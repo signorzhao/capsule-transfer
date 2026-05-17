@@ -267,7 +267,7 @@ class ReaperBridgeClient:
 
     def _diagnostics(self) -> str:
         fields = {}
-        for key in ["bridge_version_v2", "bridge_version", "bridge_exe_path", "bridge_app_version", "bridge_resource_path", "bridge_project_path", "selected_item_count", "status", "heartbeat_v2", "heartbeat", "export_phase", "command_v2", "command", "last_command_debug", "last_result_debug", "result_v2", "result"]:
+        for key in ["bridge_version_v2", "bridge_version", "bridge_exe_path", "bridge_app_version", "bridge_resource_path", "bridge_project_path", "selected_item_count", "status", "heartbeat_v2", "heartbeat", "export_phase", "preview_search_debug", "command_v2", "command", "last_command_debug", "last_result_debug", "result_v2", "result"]:
             try:
                 value = self.get_extstate(key)
             except Exception as exc:
