@@ -362,6 +362,22 @@ def _plugin_tokens(name: str) -> set[str]:
     return {token for token in normalized.split() if len(token) >= 3 and not token.isdigit()}
 
 
+def _is_ignored_plugin_name(name: str) -> bool:
+    normalized = _normalize_plugin_name(name)
+    ignored = {
+        "container",
+        "fx container",
+        "folder",
+        "track channel mapper",
+        "reainsert",
+    }
+    if normalized in ignored:
+        return True
+    if normalized.startswith("container "):
+        return True
+    return False
+
+
 def _reaper_resource_candidates() -> list[Path]:
     candidates: list[Path] = []
     system = platform.system()
@@ -457,7 +473,7 @@ def _plugin_available(required_name: str, installed: set[str]) -> bool:
 
 
 def _capsule_plugin_status(plugin_list: list) -> dict:
-    required = [str(p).strip() for p in (plugin_list or []) if str(p).strip()]
+    required = [str(p).strip() for p in (plugin_list or []) if str(p).strip() and not _is_ignored_plugin_name(str(p))]
     unique_required = []
     seen = set()
     for name in required:
