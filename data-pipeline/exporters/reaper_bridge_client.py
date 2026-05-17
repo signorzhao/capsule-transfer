@@ -127,11 +127,11 @@ class ReaperBridgeClient:
         if not resp.ok:
             raise ReaperBridgeError(f"写入 REAPER EXTSTATE 失败: HTTP {resp.status_code}")
 
-    def get_extstate(self, key: str) -> str:
+    def get_extstate(self, key: str, timeout: Optional[float] = None) -> str:
         last_exc = None
         for attempt in range(3):
             try:
-                resp = self._reaper_api(self._get_extstate_command(SECTION, key))
+                resp = self._reaper_api(self._get_extstate_command(SECTION, key), timeout=timeout)
                 break
             except Exception as exc:
                 last_exc = exc
@@ -143,6 +143,12 @@ class ReaperBridgeClient:
         if not resp.ok:
             raise ReaperBridgeError(f"读取 REAPER EXTSTATE 失败: HTTP {resp.status_code}")
         return parse_extstate_reply(resp.text, SECTION, key)
+
+    def get_extstate_best_effort(self, key: str, timeout: float = 10.0) -> str:
+        try:
+            return self.get_extstate(key, timeout=timeout)
+        except Exception:
+            return ""
 
     def status(self) -> BridgeStatus:
         if not self.test_webui():
@@ -301,6 +307,16 @@ class ReaperBridgeClient:
                 if data.get("request_id") == request_id:
                     return data
             time.sleep(POLL_INTERVAL_SECONDS)
+        for key in (result_key, "result_v2", "result", "last_result_debug"):
+            raw = self.get_extstate_best_effort(key, timeout=10.0)
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if data.get("request_id") == request_id:
+                return data
         raise ReaperBridgeError(f"等待 REAPER bridge 导出超时 ({timeout} 秒)。诊断: {self._diagnostics()}")
 
 
@@ -310,12 +326,26 @@ def quick_bridge_export(project_name: str, theme_name: str, render_preview: bool
     try:
         return client.export_capsule(project_name=project_name, theme_name=theme_name, render_preview=render_preview, capsule_type=capsule_type, export_dir=export_dir, username=username, timeout=timeout)
     except Exception:
-        diagnostics = json.loads(client._diagnostics())
+        raw_last_command = client.get_extstate_best_effort("last_command_debug", timeout=10.0)
         try:
-            last_command = json.loads(diagnostics.get("last_command_debug") or "{}")
+            last_command = json.loads(raw_last_command or "{}")
         except json.JSONDecodeError:
-            last_command = {}
+            diagnostics = json.loads(client._diagnostics())
+            try:
+                last_command = json.loads(diagnostics.get("last_command_debug") or "{}")
+            except json.JSONDecodeError:
+                last_command = {}
         request_id = last_command.get("request_id")
+        for key in ("result_v2", "result", "last_result_debug"):
+            raw_result = client.get_extstate_best_effort(key, timeout=10.0)
+            try:
+                data = json.loads(raw_result or "{}")
+            except json.JSONDecodeError:
+                continue
+            if request_id and data.get("request_id") == request_id and data.get("success") is True:
+                data.setdefault("mode", "bridge")
+                return data
+        diagnostics = json.loads(client._diagnostics())
         for key in ("result_v2", "result", "last_result_debug"):
             try:
                 data = json.loads(diagnostics.get(key) or "{}")
