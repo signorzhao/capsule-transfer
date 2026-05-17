@@ -55,6 +55,7 @@ if _DATA_PIPELINE.exists():
             export_dir=str(CAPSULES_DIR),
             resource_dir=str(_DATA_PIPELINE),
         )
+        PathManager.get_instance().update_export_dir(str(CAPSULES_DIR))
     except Exception as _pm_err:
         logging.getLogger("lan-capsule").warning("PathManager 初始化跳过: %s", _pm_err)
 
@@ -672,7 +673,7 @@ def webui_export():
     capsule_type = data.get("capsule_type", "magic")
     render_preview = data.get("render_preview", True)
     webui_port = int(data.get("webui_port", 9000))
-    export_dir = data.get("export_dir") or str(CAPSULES_DIR)
+    export_dir = str(CAPSULES_DIR)
     os.environ["SYNESTH_CAPSULE_OUTPUT"] = export_dir
 
     logger.info("Reaper bridge export: type=%s preview=%s dir=%s", capsule_type, render_preview, export_dir)
@@ -1029,11 +1030,11 @@ def p2p_send():
     if not capsule_id or not target_ip:
         return _err("capsule_id 与 target_ip 必填", 400)
 
-    cap = get_capsule_by_id(str(capsule_id))
-    if not cap:
+    capsule_root = get_capsule_dir_by_id(str(capsule_id))
+    if not capsule_root:
         return _err("胶囊不存在", 404)
-    capsule_root = CAPSULES_DIR / cap["uuid"]
-    if not capsule_root.exists():
+    cap = _capsule_from_dir(capsule_root)
+    if not cap:
         return _err("胶囊文件目录缺失", 410)
 
     self_info = network_info(PORT)
