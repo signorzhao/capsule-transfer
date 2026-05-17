@@ -800,7 +800,6 @@ def webui_export():
     return _ok(resp_data, message="导出完成")
 
 
-@app.route("/api/reaper/bridge/status", methods=["GET"])
 def reaper_bridge_status():
     webui_port = int(request.args.get("webui_port") or load_config().get("webui_port", 9000))
     try:
@@ -838,7 +837,6 @@ def reaper_bridge_status():
     return _ok(status)
 
 
-@app.route("/api/reaper/bridge/ping", methods=["GET"])
 def reaper_bridge_ping():
     webui_port = int(request.args.get("webui_port") or load_config().get("webui_port", 9000))
     try:
@@ -847,6 +845,17 @@ def reaper_bridge_ping():
         return _ok(result)
     except Exception as exc:
         return _err(str(exc), 500)
+
+
+if "reaper_bridge_status" in app.view_functions:
+    app.view_functions["reaper_bridge_status"] = reaper_bridge_status
+else:
+    app.add_url_rule("/api/reaper/bridge/status", "reaper_bridge_status", reaper_bridge_status, methods=["GET"])
+
+if "reaper_bridge_ping" in app.view_functions:
+    app.view_functions["reaper_bridge_ping"] = reaper_bridge_ping
+else:
+    app.add_url_rule("/api/reaper/bridge/ping", "reaper_bridge_ping", reaper_bridge_ping, methods=["GET"])
 
 
 # ---------------------- 联系人 ----------------------
