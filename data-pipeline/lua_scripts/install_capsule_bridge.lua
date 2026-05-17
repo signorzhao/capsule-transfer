@@ -39,6 +39,23 @@ local function StartupBlock(bridge_path)
     "-- <<< Capsule Transfer Bridge <<<\n"
 end
 
+local function CopyFile(src_path, dst_path)
+  local src = io.open(src_path, "rb")
+  if not src then
+    return false, "无法读取 bridge 源文件: " .. tostring(src_path)
+  end
+  local content = src:read("*a") or ""
+  src:close()
+
+  local dst = io.open(dst_path, "wb")
+  if not dst then
+    return false, "无法写入 bridge 安装文件: " .. tostring(dst_path)
+  end
+  dst:write(content)
+  dst:close()
+  return true, ""
+end
+
 local function StartBridge(bridge_path)
   local bridge_func, load_err = loadfile(bridge_path)
   if not bridge_func then
@@ -70,10 +87,19 @@ local function Main()
   local scripts_dir = resource_path .. "/Scripts"
   reaper.RecursiveCreateDirectory(scripts_dir, 0)
 
+  local install_dir = scripts_dir .. "/CapsuleTransfer"
+  reaper.RecursiveCreateDirectory(install_dir, 0)
+  local installed_bridge_path = install_dir .. "/capsule_bridge.lua"
+  local copied, copy_err = CopyFile(bridge_path, installed_bridge_path)
+  if not copied then
+    WriteResult(false, copy_err)
+    return
+  end
+
   local startup_path = scripts_dir .. "/__startup.lua"
   local marker_begin = "-- >>> Capsule Transfer Bridge >>>"
   local marker_end = "-- <<< Capsule Transfer Bridge <<<"
-  local block = StartupBlock(bridge_path)
+  local block = StartupBlock(installed_bridge_path)
 
   local existing = ""
   local rf = io.open(startup_path, "r")
@@ -108,13 +134,13 @@ local function Main()
     wf:close()
   end
 
-  local started, start_err = StartBridge(bridge_path)
+  local started, start_err = StartBridge(installed_bridge_path)
   if not started then
     WriteResult(false, start_err)
     return
   end
 
-  WriteResult(true, "Capsule Transfer Bridge 已安装并启动")
+  WriteResult(true, "Capsule Transfer Bridge 已安装到 REAPER 启动项并启动")
 end
 
 reaper.defer(Main)

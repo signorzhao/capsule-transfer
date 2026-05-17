@@ -12,6 +12,7 @@ import logging
 import os
 import platform
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -825,12 +826,23 @@ def reaper_bridge_status():
     except Exception:
         pass
 
+    desired_bridge_version = ""
+    bridge_script = _DATA_PIPELINE / "lua_scripts" / "capsule_bridge.lua"
+    try:
+        bridge_text = bridge_script.read_text("utf-8", errors="ignore")
+        version_match = re.search(r'BRIDGE_VERSION\s*=\s*"([^"]+)"', bridge_text)
+        if version_match:
+            desired_bridge_version = version_match.group(1)
+    except Exception:
+        pass
+
     status.update(diagnostics)
     status.update({
         "app_dir": str(APP_DIR),
         "data_dir": str(DATA_DIR),
         "capsules_dir": str(CAPSULES_DIR),
         "data_pipeline_dir": str(_DATA_PIPELINE),
+        "desired_bridge_version": desired_bridge_version,
         "path_manager": path_manager,
         "env_export_dir": os.environ.get("CAPSULE_TRANSFER_EXPORT_DIR", ""),
     })

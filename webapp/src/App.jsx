@@ -86,6 +86,7 @@ function Shell() {
   const [receiveMode, setReceiveMode] = useState('auto');
   const [pendingRequests, setPendingRequests] = useState([]);
   const [showIncoming, setShowIncoming] = useState(false);
+  const autoBridgeAttemptedRef = useRef(false);
 
   const captureStepsForPhase = useCallback((phase = '', renderPreview = true) => {
     const lower = String(phase || '').toLowerCase();
@@ -147,6 +148,20 @@ function Shell() {
 
   useEffect(() => {
     api.getReceiveMode().then((r) => setReceiveMode(r.data?.mode || 'auto')).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (autoBridgeAttemptedRef.current) return;
+    autoBridgeAttemptedRef.current = true;
+    api.getReaperBridgeStatus().then((r) => {
+      const status = r.data || {};
+      const desired = status.desired_bridge_version;
+      const needsUpdate = desired && status.bridge_version && status.bridge_version !== desired;
+      const needsStart = status.webui_available && (!status.bridge_available || needsUpdate);
+      if (needsStart) {
+        api.installReaperBridge().catch(() => {});
+      }
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -155,6 +156,14 @@ def register_reaper_bridge_routes(app, ok, err, data_pipeline_dir: Path, load_co
             }
 
         lua_dir = data_pipeline_dir / "lua_scripts"
+        desired_bridge_version = ""
+        try:
+            bridge_text = (lua_dir / "capsule_bridge.lua").read_text("utf-8", errors="ignore")
+            version_match = re.search(r'BRIDGE_VERSION\s*=\s*"([^"]+)"', bridge_text)
+            if version_match:
+                desired_bridge_version = version_match.group(1)
+        except Exception:
+            pass
         configured_reaper = _find_reaper_executable(load_config)
         bridge_exe_path = status.get("bridge_exe_path") or ""
         configured_reaper_path = str(configured_reaper) if configured_reaper else ""
@@ -165,6 +174,7 @@ def register_reaper_bridge_routes(app, ok, err, data_pipeline_dir: Path, load_co
             "webui_port": port,
             "bridge_script": str(lua_dir / "capsule_bridge.lua"),
             "installer_script": str(lua_dir / "install_capsule_bridge.lua"),
+            "desired_bridge_version": desired_bridge_version,
             "configured_reaper_path": configured_reaper_path,
             "reaper_path_match": reaper_path_match,
         })
