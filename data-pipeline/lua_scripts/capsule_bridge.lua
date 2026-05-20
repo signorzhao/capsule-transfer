@@ -13,7 +13,26 @@ local RUNNING_KEY = "_CAPSULE_TRANSFER_BRIDGE_V2_RUNNING"
 local PROCESS_DISABLE_ENV = "CAPSULE_TRANSFER_BRIDGE_DISABLED"
 local NO_SELECTION_GRACE_SECONDS = 8
 
+local logger = nil
+pcall(function()
+  local dir = debug.getinfo(1).source:match("@(.*[/\\])") or ""
+  logger = dofile(dir .. "diagnostic_logger.lua")
+end)
+
+local function Diag(event, fields)
+  if logger and logger.write then
+    pcall(logger.write, event, fields or {})
+  end
+end
+
+Diag("bridge_boot", {
+  version = BRIDGE_VERSION,
+  exe_path = reaper.GetExePath and tostring(reaper.GetExePath()) or "",
+  app_version = reaper.GetAppVersion and tostring(reaper.GetAppVersion()) or "",
+})
+
 if os.getenv(PROCESS_DISABLE_ENV) == "1" then
+  Diag("bridge_disabled_env", { env = PROCESS_DISABLE_ENV })
   return
 end
 
@@ -21,6 +40,10 @@ if _G[RUNNING_KEY] then
   local last_heartbeat = tonumber(reaper.GetExtState(SECTION, HEARTBEAT_KEY) or "")
   local status = reaper.GetExtState(SECTION, "status")
   local age = last_heartbeat and (os.time() - last_heartbeat) or nil
+  Diag("bridge_already_running", {
+    status = status,
+    heartbeat_age = age or "",
+  })
   if status == "exporting" or (age and age >= 0 and age <= HEARTBEAT_STALE_SECONDS) then
     return
   end
@@ -384,12 +407,22 @@ local function PollOnce()
   local raw = reaper.GetExtState(SECTION, COMMAND_KEY)
   if raw and raw ~= "" then
     local command_type = ExtractJsonString(raw, "type") or ""
+    local request_id = ExtractJsonString(raw, "request_id") or ""
+
+    Diag("command_detected", {
+      request_id = request_id,
+      command_type = command_type,
+      selected_items = reaper.CountSelectedMediaItems(0),
+    })
+
     if command_type == "export_capsule" and reaper.CountSelectedMediaItems(0) == 0 then
-      local request_id = ExtractJsonString(raw, "request_id") or ""
       local now = reaper.time_precise and reaper.time_precise() or os.time()
       if _G._CAPSULE_TRANSFER_NO_SELECTION_REQUEST_ID ~= request_id then
         _G._CAPSULE_TRANSFER_NO_SELECTION_REQUEST_ID = request_id
         _G._CAPSULE_TRANSFER_NO_SELECTION_FIRST_SEEN = now
+        Diag("no_selection_first_seen", {
+          request_id = request_id,
+        })
       end
       local first_seen = _G._CAPSULE_TRANSFER_NO_SELECTION_FIRST_SEEN or now
       if (now - first_seen) < NO_SELECTION_GRACE_SECONDS then
@@ -399,6 +432,10 @@ local function PollOnce()
     end
 
     reaper.SetExtState(SECTION, COMMAND_KEY, "", false)
+    Diag("command_cleared", {
+      request_id = request_id,
+    })
+
     _G._CAPSULE_TRANSFER_NO_SELECTION_REQUEST_ID = nil
     _G._CAPSULE_TRANSFER_NO_SELECTION_FIRST_SEEN = nil
     local ok, err = pcall(HandleCommand, raw)
@@ -406,6 +443,10 @@ local function PollOnce()
       local request_id = ExtractJsonString(raw, "request_id") or ""
       reaper.SetExtState(SECTION, "status", "idle", false)
       Phase("bridge pcall error")
+      Diag("bridge_pcall_error", {
+        request_id = request_id,
+        error = tostring(err),
+      })
       WriteJsonResult(false, request_id, nil, "bridge 执行失败: " .. tostring(err), { mode = "bridge" })
     end
   end
@@ -417,6 +458,9 @@ local function Poll()
   if not ok then
     reaper.SetExtState(SECTION, "status", "idle", false)
     Phase("bridge poll error")
+    Diag("poll_error", {
+      error = tostring(err),
+    })
     WriteJsonResult(false, "", nil, "bridge 轮询失败: " .. tostring(err), { mode = "bridge" })
   end
   reaper.defer(Poll)
@@ -426,4 +470,5 @@ reaper.SetExtState(SECTION, COMMAND_KEY, "", false)
 reaper.SetExtState(SECTION, RESULT_KEY, "", false)
 reaper.SetExtState(SECTION, "status", "idle", false)
 Phase("idle")
+Diag("bridge_ready", { version = BRIDGE_VERSION })
 Poll()
