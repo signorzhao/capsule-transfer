@@ -71,6 +71,8 @@ class BridgeStatus:
     bridge_resource_path: str = ""
     bridge_project_path: str = ""
     selected_item_count: Optional[int] = None
+    bridge_instance_id: str = ""
+    bridge_instance_conflict: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -89,6 +91,8 @@ class BridgeStatus:
             "bridge_resource_path": self.bridge_resource_path,
             "bridge_project_path": self.bridge_project_path,
             "selected_item_count": self.selected_item_count,
+            "bridge_instance_id": self.bridge_instance_id,
+            "bridge_instance_conflict": self.bridge_instance_conflict,
         }
 
 
@@ -165,6 +169,8 @@ class ReaperBridgeClient:
             bridge_app_version = self.get_extstate("bridge_app_version")
             bridge_resource_path = self.get_extstate("bridge_resource_path")
             bridge_project_path = self.get_extstate("bridge_project_path")
+            bridge_instance_id = self.get_extstate("bridge_instance_id")
+            bridge_instance_conflict = self.get_extstate("bridge_instance_conflict")
             selected_item_count = None
             try:
                 selected_item_count = int(self.get_extstate("selected_item_count") or "0")
@@ -206,6 +212,8 @@ class ReaperBridgeClient:
                 bridge_resource_path=bridge_resource_path,
                 bridge_project_path=bridge_project_path,
                 selected_item_count=selected_item_count,
+                bridge_instance_id=bridge_instance_id,
+                bridge_instance_conflict=bridge_instance_conflict,
             )
         except Exception as exc:
             return BridgeStatus(True, False, error=f"Bridge 状态读取失败: {exc}")
@@ -273,7 +281,7 @@ class ReaperBridgeClient:
 
     def _diagnostics(self) -> str:
         fields = {}
-        for key in ["bridge_version_v2", "bridge_version", "bridge_exe_path", "bridge_app_version", "bridge_resource_path", "bridge_project_path", "selected_item_count", "status", "heartbeat_v2", "heartbeat", "export_phase", "preview_render_debug", "preview_search_debug", "command_v2", "command", "last_command_debug", "last_result_debug", "result_v2", "result"]:
+        for key in ["bridge_version_v2", "bridge_version", "bridge_exe_path", "bridge_app_version", "bridge_resource_path", "bridge_project_path", "bridge_instance_id", "bridge_instance_conflict", "selected_item_count", "status", "heartbeat_v2", "heartbeat", "export_phase", "preview_render_debug", "preview_search_debug", "command_v2", "command", "last_command_debug", "last_result_debug", "result_v2", "result"]:
             try:
                 value = self.get_extstate(key)
             except Exception as exc:

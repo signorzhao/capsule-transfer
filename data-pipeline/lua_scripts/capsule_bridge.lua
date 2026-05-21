@@ -10,8 +10,13 @@ local RESULT_KEY = "result_v2"
 local HEARTBEAT_KEY = "heartbeat_v2"
 local VERSION_KEY = "bridge_version_v2"
 local RUNNING_KEY = "_CAPSULE_TRANSFER_BRIDGE_V2_RUNNING"
+local INSTANCE_KEY = "bridge_instance_id"
+local CONFLICT_KEY = "bridge_instance_conflict"
 local PROCESS_DISABLE_ENV = "CAPSULE_TRANSFER_BRIDGE_DISABLED"
 local NO_SELECTION_GRACE_SECONDS = 8
+local seed = reaper.time_precise and math.floor(reaper.time_precise() * 1000000) or os.time()
+math.randomseed(seed)
+local INSTANCE_ID = tostring(seed) .. "-" .. tostring(math.random(100000, 999999))
 
 local logger = nil
 pcall(function()
@@ -27,6 +32,7 @@ end
 
 Diag("bridge_boot", {
   version = BRIDGE_VERSION,
+  instance_id = INSTANCE_ID,
   exe_path = reaper.GetExePath and tostring(reaper.GetExePath()) or "",
   app_version = reaper.GetAppVersion and tostring(reaper.GetAppVersion()) or "",
 })
@@ -40,7 +46,11 @@ if _G[RUNNING_KEY] then
   local last_heartbeat = tonumber(reaper.GetExtState(SECTION, HEARTBEAT_KEY) or "")
   local status = reaper.GetExtState(SECTION, "status")
   local age = last_heartbeat and (os.time() - last_heartbeat) or nil
+  local existing_instance = tostring(_G[RUNNING_KEY])
+  reaper.SetExtState(SECTION, CONFLICT_KEY, "existing=" .. existing_instance .. "; rejected=" .. INSTANCE_ID, false)
   Diag("bridge_already_running", {
+    existing_instance_id = existing_instance,
+    rejected_instance_id = INSTANCE_ID,
     status = status,
     heartbeat_age = age or "",
   })
@@ -48,13 +58,17 @@ if _G[RUNNING_KEY] then
     return
   end
 end
-_G[RUNNING_KEY] = true
+_G[RUNNING_KEY] = INSTANCE_ID
 _CAPSULE_TRANSFER_BRIDGE_RUNNING = true
+reaper.SetExtState(SECTION, INSTANCE_KEY, INSTANCE_ID, false)
+reaper.SetExtState(SECTION, CONFLICT_KEY, "", false)
 
 local function Heartbeat()
   local now = tostring(os.time())
   reaper.SetExtState(SECTION, HEARTBEAT_KEY, now, false)
   reaper.SetExtState(SECTION, "heartbeat", now, false)
+  reaper.SetExtState(SECTION, INSTANCE_KEY, INSTANCE_ID, false)
+  reaper.SetExtState(SECTION, CONFLICT_KEY, "", false)
 
   local exe_path = ""
   if reaper.GetExePath then
@@ -400,6 +414,15 @@ local function HandleCommand(raw)
 end
 
 local function PollOnce()
+  if _G[RUNNING_KEY] ~= INSTANCE_ID then
+    reaper.SetExtState(SECTION, CONFLICT_KEY, "active=" .. tostring(_G[RUNNING_KEY]) .. "; stopped=" .. INSTANCE_ID, false)
+    Diag("bridge_instance_stopped", {
+      active_instance_id = tostring(_G[RUNNING_KEY]),
+      stopped_instance_id = INSTANCE_ID,
+    })
+    return false
+  end
+
   reaper.SetExtState(SECTION, VERSION_KEY, BRIDGE_VERSION, false)
   reaper.SetExtState(SECTION, "bridge_version", BRIDGE_VERSION, false)
   Heartbeat()
@@ -411,6 +434,7 @@ local function PollOnce()
 
     Diag("command_detected", {
       request_id = request_id,
+      instance_id = INSTANCE_ID,
       command_type = command_type,
       selected_items = reaper.CountSelectedMediaItems(0),
     })
@@ -432,8 +456,11 @@ local function PollOnce()
     end
 
     reaper.SetExtState(SECTION, COMMAND_KEY, "", false)
+    reaper.SetExtState(SECTION, "command_owner_instance_id", INSTANCE_ID, false)
+    reaper.SetExtState(SECTION, "command_owner_request_id", request_id, false)
     Diag("command_cleared", {
       request_id = request_id,
+      instance_id = INSTANCE_ID,
     })
 
     _G._CAPSULE_TRANSFER_NO_SELECTION_REQUEST_ID = nil
@@ -451,18 +478,20 @@ local function PollOnce()
     end
   end
 
+  return true
 end
 
 local function Poll()
-  local ok, err = pcall(PollOnce)
+  local ok, keep_going = pcall(PollOnce)
   if not ok then
     reaper.SetExtState(SECTION, "status", "idle", false)
     Phase("bridge poll error")
     Diag("poll_error", {
-      error = tostring(err),
+      error = tostring(keep_going),
     })
-    WriteJsonResult(false, "", nil, "bridge 轮询失败: " .. tostring(err), { mode = "bridge" })
+    WriteJsonResult(false, "", nil, "bridge 轮询失败: " .. tostring(keep_going), { mode = "bridge" })
   end
+  if ok and keep_going == false then return end
   reaper.defer(Poll)
 end
 

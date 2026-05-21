@@ -20,7 +20,6 @@ import {
   Check,
   X,
   Radio,
-  DownloadCloud,
   AlertTriangle,
   Shield,
   ShieldOff,
@@ -86,7 +85,10 @@ function Shell() {
   const [receiveMode, setReceiveMode] = useState('auto');
   const [pendingRequests, setPendingRequests] = useState([]);
   const [showIncoming, setShowIncoming] = useState(false);
-  const autoBridgeAttemptedRef = useRef(false);
+  const [bridgeStatus, setBridgeStatus] = useState(null);
+  const [showSetupWizard, setShowSetupWizard] = useState(false);
+  const setupCheckedRef = useRef(false);
+  const lastSetupStateRef = useRef('');
 
   const captureStepsForPhase = useCallback((phase = '', renderPreview = true) => {
     const lower = String(phase || '').toLowerCase();
@@ -140,6 +142,18 @@ function Shell() {
     }
   }, [toast]);
 
+  const refreshBridgeStatus = useCallback(async () => {
+    try {
+      const r = await api.getReaperBridgeStatus();
+      setBridgeStatus(r.data);
+      return r.data;
+    } catch (e) {
+      const fallback = { setup_state: 'NEED_WEBUI', webui_available: false, bridge_available: false, error: e.message, setup_message: e.message };
+      setBridgeStatus(fallback);
+      return fallback;
+    }
+  }, []);
+
   useEffect(() => {
     refreshAll();
     const t = setInterval(refreshAll, 15000);
@@ -151,18 +165,26 @@ function Shell() {
   }, []);
 
   useEffect(() => {
-    if (autoBridgeAttemptedRef.current) return;
-    autoBridgeAttemptedRef.current = true;
-    api.getReaperBridgeStatus().then((r) => {
-      const status = r.data || {};
-      const desired = status.desired_bridge_version;
-      const needsUpdate = desired && status.bridge_version && status.bridge_version !== desired;
-      const needsStart = status.webui_available && (!status.bridge_available || needsUpdate);
-      if (needsStart) {
-        api.installReaperBridge().catch(() => {});
+    let alive = true;
+    const checkSetup = async () => {
+      const status = await refreshBridgeStatus();
+      if (!alive) return;
+      const state = status?.setup_state || '';
+      if (!setupCheckedRef.current) {
+        setupCheckedRef.current = true;
+        if (state && state !== 'READY') setShowSetupWizard(true);
+      } else if (lastSetupStateRef.current === 'READY' && state && state !== 'READY') {
+        setShowSetupWizard(true);
       }
-    }).catch(() => {});
-  }, []);
+      lastSetupStateRef.current = state;
+    };
+    checkSetup();
+    const t = setInterval(checkSetup, 15000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [refreshBridgeStatus]);
 
   useEffect(() => {
     const es = new EventSource(api.notificationsUrl);
@@ -207,6 +229,20 @@ function Shell() {
     setActiveTab('transfer');
   };
 
+  const handleRequestCreateCapsule = async () => {
+    const status = await refreshBridgeStatus();
+    if (status?.setup_state !== 'READY') {
+      setShowSetupWizard(true);
+      toast.info(status?.setup_message || '请先完成 REAPER 设置。');
+      return false;
+    }
+    if (status?.selected_item_count !== null && status?.selected_item_count !== undefined && Number(status.selected_item_count) <= 0) {
+      toast.error('请先在 REAPER 中选中要保存为胶囊的 Item。');
+      return false;
+    }
+    return true;
+  };
+
   const handleStartTransferTo = (contact) => {
     setTargetContacts((prev) => (prev.find((c) => c.id === contact.id) ? prev : [...prev, contact]));
     setActiveTab('transfer');
@@ -239,6 +275,16 @@ function Shell() {
   };
 
   const handleCreateCapsule = async (payload) => {
+    const preflight = await refreshBridgeStatus();
+    if (preflight?.setup_state !== 'READY') {
+      setShowSetupWizard(true);
+      toast.error(preflight?.setup_message || '请先完成 REAPER 设置。');
+      return;
+    }
+    if (preflight?.selected_item_count !== null && preflight?.selected_item_count !== undefined && Number(preflight.selected_item_count) <= 0) {
+      toast.error('请先在 REAPER 中选中要保存为胶囊的 Item。');
+      return;
+    }
     const initialSteps = captureStepsForPhase('', payload?.render_preview);
     setCaptureStatus({ phase: 'saving', message: '正在连接 REAPER Bridge...', steps: initialSteps });
     const controller = new AbortController();
@@ -312,6 +358,8 @@ function Shell() {
       if (!resp.ok || !body.success) {
         const flags = body.data || {};
         let message = body.error || `HTTP ${resp.status}`;
+        if (flags.needs_setup) message = `${message}\n\n请完成 REAPER Setup Wizard。`;
+        if (flags.selected_items_required) message = `${message}\n\n请回到 REAPER 选中要保存的 Item 后再捕获。`;
         if (flags.needs_bridge_install) message = `${message}\n\n请到“设置 / 信息”安装 REAPER Bridge。`;
         if (flags.webui_required) message = `${message}\n\n请确认 REAPER 已打开并启用 Web Interface（默认端口 9000）。`;
         if (flags.export_phase) message = `${message}\n\nBridge 阶段：${flags.export_phase}`;
@@ -509,19 +557,20 @@ function Shell() {
         </header>
 
         <main className="flex-1 overflow-y-auto p-6 custom-scrollbar">
-          {activeTab === 'library' && <LibraryView capsules={capsules} onSend={handleSelectCapsuleForSend} onDelete={handleDeleteCapsule} onCreate={handleCreateCapsule} onRename={handleRenameCapsule} onOpenRpp={handleOpenRpp} onOpenFolder={handleOpenFolder} />}
+          {activeTab === 'library' && <LibraryView capsules={capsules} onSend={handleSelectCapsuleForSend} onDelete={handleDeleteCapsule} onCreate={handleCreateCapsule} onRequestCreate={handleRequestCreateCapsule} onRename={handleRenameCapsule} onOpenRpp={handleOpenRpp} onOpenFolder={handleOpenFolder} />}
           {activeTab === 'contacts' && <ContactsView contacts={contacts} onlineContacts={onlineContacts} onSend={handleStartTransferTo} onDelete={handleDeleteContact} onPing={handlePingContact} showAddForm={showAddContact} setShowAddForm={setShowAddContact} onAdd={handleAddContact} />}
           {activeTab === 'transfer' && <TransferView capsules={capsules} contacts={contacts} selectedCapsules={selectedCapsules} setSelectedCapsules={setSelectedCapsules} targetContacts={targetContacts} setTargetContacts={setTargetContacts} tempPeer={tempPeer} setTempPeer={setTempPeer} showTempPeerForm={showTempPeerForm} setShowTempPeerForm={setShowTempPeerForm} isSending={isSending} onSend={handleSend} />}
-          {activeTab === 'settings' && <SettingsView networkInfo={networkInfo} apiBase={api.base} />}
+          {activeTab === 'settings' && <SettingsView networkInfo={networkInfo} apiBase={api.base} bridgeStatus={bridgeStatus} onRefreshBridge={refreshBridgeStatus} onOpenSetup={() => setShowSetupWizard(true)} />}
         </main>
       </div>
       {captureStatus && <CaptureOverlayV2 status={captureStatus} onClose={() => setCaptureStatus(null)} />}
+      {showSetupWizard && <SetupWizard status={bridgeStatus} onClose={() => setShowSetupWizard(false)} onRefresh={refreshBridgeStatus} />}
       {showIncoming && pendingRequests.length > 0 && <IncomingRequestsOverlay requests={pendingRequests} onAccept={handleAcceptRequest} onReject={handleRejectRequest} onClose={() => setShowIncoming(false)} />}
     </div>
   );
 }
 
-function LibraryView({ capsules, onSend, onDelete, onCreate, onRename, onOpenRpp, onOpenFolder }) {
+function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, onRename, onOpenRpp, onOpenFolder }) {
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [playingId, setPlayingId] = useState(null);
   const audioRef = useRef(null);
@@ -553,7 +602,14 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRename, onOpenRpp
       <div className="flex items-center justify-between mb-8">
         <div><h1 className="text-2xl font-bold text-white">我的胶囊</h1><p className="text-slate-500 text-sm mt-1">本地已捕获 / 接收的胶囊（共 {capsules.length} 个）</p></div>
         <div className="flex items-center space-x-2">
-          <button onClick={() => setShowCreateForm((v) => !v)} className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg flex items-center space-x-2 shadow-lg shadow-indigo-600/20"><Plus size={18} /><span>新捕获</span></button>
+          <button onClick={async () => {
+            if (showCreateForm) {
+              setShowCreateForm(false);
+              return;
+            }
+            const allowed = await onRequestCreate();
+            if (allowed) setShowCreateForm(true);
+          }} className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg flex items-center space-x-2 shadow-lg shadow-indigo-600/20"><Plus size={18} /><span>新捕获</span></button>
         </div>
       </div>
 
@@ -675,62 +731,213 @@ function TransferView({ capsules, contacts, selectedCapsules, setSelectedCapsule
   return <div className="max-w-2xl mx-auto mt-6"><div className="bg-[#1a1d24] p-8 rounded-3xl border border-slate-800 shadow-2xl relative overflow-hidden"><h2 className="text-xl font-bold text-white mb-6 flex items-center"><Send size={20} className="mr-2 text-indigo-500" />发送胶囊</h2><div className="mb-8"><label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">目标联系人</label><div className="grid grid-cols-2 gap-3">{contacts.map((c) => { const selected = targetContacts.find((tc) => tc.id === c.id); return <button key={c.id} onClick={() => toggleTarget(c)} className={`flex items-center space-x-3 bg-[#0f1115] p-3 rounded-xl border text-left ${selected ? 'border-indigo-500 bg-indigo-600/5' : 'border-slate-800 hover:border-indigo-500'}`}><div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs ${selected ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}>{selected ? <Check size={14} /> : (c.name || '?')[0]}</div><div className="min-w-0"><div className="text-xs font-medium truncate">{c.name}</div><div className="text-[10px] text-slate-500 font-mono truncate">{c.ip}:{c.port}</div></div></button>; })}<button onClick={() => setShowTempPeerForm((v) => !v)} className="flex items-center justify-center space-x-2 bg-[#0f1115] p-3 rounded-xl border border-slate-800 hover:border-slate-700 text-slate-500"><Plus size={14} /><span className="text-xs">临时 IP</span></button></div>{showTempPeerForm && <div className="grid grid-cols-3 gap-3 mt-3"><input className="col-span-2 bg-[#0f1115] border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200" placeholder="对方 IP" value={tempPeer.ip} onChange={(e) => setTempPeer({ ...tempPeer, ip: e.target.value })} /><input className="bg-[#0f1115] border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200" placeholder="端口" value={tempPeer.port} onChange={(e) => setTempPeer({ ...tempPeer, port: e.target.value })} /></div>}</div><div className="mb-10"><label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">选择内容</label><div className="space-y-2 max-h-56 overflow-y-auto custom-scrollbar pr-1">{capsules.length === 0 && <div className="text-xs text-slate-500 bg-[#0f1115] border border-slate-800 rounded-xl p-3">胶囊库为空。</div>}{capsules.map((cap) => { const selected = selectedCapsules.find((sc) => sc.id === cap.id); return <button key={cap.id} onClick={() => toggleCapsule(cap)} className={`w-full text-left bg-[#0f1115] p-3 rounded-xl border flex items-center justify-between ${selected ? 'border-indigo-500 bg-indigo-600/5' : 'border-slate-800 hover:border-indigo-500'}`}><div className="flex items-center space-x-3 min-w-0"><div className={`w-5 h-5 rounded flex items-center justify-center ${selected ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-500'}`}>{selected ? <Check size={12} /> : null}</div><FileAudio className="text-indigo-400 shrink-0" size={16} /><span className="text-xs truncate">{cap.name}</span></div><span className="text-[10px] text-slate-500">{formatBytes(cap.size_bytes)}</span></button>; })}</div></div>{totalTasks > 0 && <div className="mb-4 text-xs text-slate-400 text-center">将发送 {selectedCapsules.length} 个胶囊 → {targetContacts.length + (tempPeer.ip ? 1 : 0)} 个目标（共 {totalTasks} 项任务）</div>}<button disabled={selectedCapsules.length === 0 || totalTasks === 0 || isSending} onClick={onSend} className={`w-full py-4 rounded-2xl font-bold flex items-center justify-center space-x-2 ${isSending || selectedCapsules.length === 0 || totalTasks === 0 ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/30'}`}>{isSending ? <span>正在发射…</span> : <><Zap size={18} fill="currentColor" /><span>立即发送</span></>}</button>{isSending && <div className="absolute bottom-0 left-0 w-full bg-slate-800 h-1 overflow-hidden"><div className="bg-indigo-500 h-full w-1/3 animate-pulse" /></div>}</div></div>;
 }
 
-function SettingsView({ networkInfo, apiBase }) {
-  const [settings, setSettings] = useState(null);
-  const [reaperPath, setReaperPath] = useState('');
-  const [bridgeStatus, setBridgeStatus] = useState(null);
-  const [saving, setSaving] = useState(false);
+function SettingsView({ networkInfo, apiBase, bridgeStatus, onRefreshBridge, onOpenSetup }) {
   const [checkingBridge, setCheckingBridge] = useState(false);
-  const [installingBridge, setInstallingBridge] = useState(false);
-  const toast = useToast();
 
-  const refreshBridgeStatus = useCallback(async () => {
+  useEffect(() => {
+    onRefreshBridge();
+  }, [onRefreshBridge]);
+
+  const refresh = async () => {
     setCheckingBridge(true);
     try {
-      const r = await api.getReaperBridgeStatus();
-      setBridgeStatus(r.data);
-    } catch (e) {
-      setBridgeStatus({ webui_available: false, bridge_available: false, error: e.message });
+      await onRefreshBridge();
     } finally {
       setCheckingBridge(false);
     }
-  }, []);
+  };
+
+  const bridgeOk = bridgeStatus?.setup_state === 'READY';
+  const bridgeLabel = bridgeOk
+    ? `已确认 v${bridgeStatus.bridge_version || ''}`
+    : bridgeStatus?.setup_message || 'REAPER 设置未完成';
+
+  return (
+    <div className="max-w-2xl mx-auto">
+      <h1 className="text-2xl font-bold text-white mb-6">设置 / 信息</h1>
+      <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 mb-6">
+        <h3 className="text-sm font-bold text-slate-200 mb-4">REAPER 设置</h3>
+        <div className={`rounded-xl border p-4 mb-4 ${bridgeOk ? 'bg-emerald-500/10 border-emerald-500/25' : 'bg-amber-500/10 border-amber-500/25'}`}>
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-center space-x-3 min-w-0">
+              <Radio size={18} className={bridgeOk ? 'text-emerald-400' : 'text-amber-400'} />
+              <div className="min-w-0">
+                <div className="text-sm font-bold text-slate-200">{bridgeLabel}</div>
+                <div className="text-xs text-slate-500 mt-1">捕获前会校验 WebUI、Bridge、资源目录和选中 Item。</div>
+              </div>
+            </div>
+            <button onClick={refresh} disabled={checkingBridge} className="px-3 py-2 text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg disabled:opacity-40 shrink-0">{checkingBridge ? '检测中...' : '重新检测'}</button>
+          </div>
+          {bridgeStatus?.error && <div className="mt-3 text-xs text-amber-300 flex items-start space-x-2"><AlertTriangle size={14} className="mt-0.5 shrink-0" /><span>{bridgeStatus.error}</span></div>}
+        </div>
+        <button onClick={onOpenSetup} className="w-full px-4 py-3 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl flex items-center justify-center space-x-2">
+          <Settings size={16} />
+          <span>{bridgeOk ? '重新设置 REAPER' : '打开 Setup Wizard'}</span>
+        </button>
+      </div>
+      <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 mb-6 space-y-3 text-sm">
+        <h3 className="text-sm font-bold text-slate-200 mb-4">当前连接的 REAPER</h3>
+        <Row k="状态" v={bridgeStatus?.setup_state || '未知'} />
+        <Row k="WebUI 端口" v={bridgeStatus?.webui_port} />
+        <Row k="版本" v={bridgeStatus?.bridge_app_version} />
+        <Row k="程序位置" v={bridgeStatus?.bridge_exe_path} />
+        <Row k="资源目录" v={bridgeStatus?.bridge_resource_path} />
+        <Row k="已选 Item" v={bridgeStatus?.selected_item_count ?? '未知'} />
+      </div>
+      <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 mb-6 space-y-3 text-sm">
+        <h3 className="text-sm font-bold text-slate-200 mb-4">已保存绑定</h3>
+        <Row k="版本" v={bridgeStatus?.confirmed_reaper_app_version} />
+        <Row k="程序位置" v={bridgeStatus?.confirmed_reaper_exe_path} />
+        <Row k="资源目录" v={bridgeStatus?.confirmed_reaper_resource_path} />
+        <Row k="确认时间" v={bridgeStatus?.confirmed_at ? formatDate(bridgeStatus.confirmed_at) : ''} />
+      </div>
+      <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 space-y-3 text-sm"><Row k="API 地址" v={apiBase} /><Row k="主机名" v={networkInfo?.hostname} /><Row k="主 IP" v={networkInfo?.ip} /><Row k="监听端口" v={networkInfo?.port} /><Row k="所有 IP" v={(networkInfo?.all_ips || []).join('  ·  ')} /><Row k="共享密钥" v={networkInfo?.shared_token_required ? '已启用' : '未启用'} /></div>
+      <p className="text-xs text-slate-500 mt-4 leading-relaxed">提示：仅在你信任的局域网内运行。若启用了共享密钥，发送方需在请求头携带相同的 <code className="text-slate-300">X-Capsule-Token</code>。</p>
+    </div>
+  );
+}
+
+function SetupWizard({ status, onClose, onRefresh }) {
+  const [current, setCurrent] = useState(status);
+  const [checking, setChecking] = useState(false);
+  const [port, setPort] = useState(String(status?.webui_port || 9000));
+  const toast = useToast();
 
   useEffect(() => {
-    api.getSettings().then((r) => { setSettings(r.data); setReaperPath(r.data?.reaper_path || ''); }).catch(() => {});
-    refreshBridgeStatus();
-  }, [refreshBridgeStatus]);
+    setCurrent(status);
+    if (status?.webui_port) setPort(String(status.webui_port));
+  }, [status]);
 
-  const handleSaveReaperPath = async () => {
-    setSaving(true);
+  const refresh = async () => {
+    setChecking(true);
     try {
-      const r = await api.updateSettings({ reaper_path: reaperPath });
-      setSettings(r.data);
-      toast.success('REAPER 路径已保存');
+      const next = await onRefresh();
+      setCurrent(next);
+      return next;
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const savePortAndRefresh = async () => {
+    const nextPort = Number(port) || 9000;
+    try {
+      await api.updateSettings({ webui_port: nextPort });
+      toast.success(`WebUI 端口已设为 ${nextPort}`);
+      await refresh();
+    } catch (e) {
+      toast.error(`保存端口失败：${e.message}`);
+    }
+  };
+
+  const openScriptFolder = async () => {
+    try {
+      await api.openReaperBridgeScriptFolder();
+      toast.success('已打开脚本目录');
+    } catch (e) {
+      toast.error(`打开脚本目录失败：${e.message}`);
+    }
+  };
+
+  const confirmCurrentReaper = async () => {
+    try {
+      const r = await api.confirmReaperBridge({ webui_port: Number(port) || 9000 });
+      setCurrent(r.data);
+      toast.success('已保存 REAPER 设置');
+      onRefresh();
+      onClose();
     } catch (e) {
       toast.error(`保存失败：${e.message}`);
-    } finally {
-      setSaving(false);
     }
   };
 
-  const handleInstallBridge = async () => {
-    setInstallingBridge(true);
-    try {
-      const r = await api.installReaperBridge();
-      toast.success(r.data?.message || 'Bridge 安装命令已发送');
-      setTimeout(refreshBridgeStatus, 1000);
-    } catch (e) {
-      toast.error(`安装失败：${e.message}`);
-    } finally {
-      setInstallingBridge(false);
-    }
-  };
+  const state = current?.setup_state || 'NEED_WEBUI';
+  const currentStep = !current?.webui_available ? 0 : (!current?.bridge_available || state === 'NEED_REPAIR' ? 1 : 2);
+  const canConfirm = current?.webui_available && current?.bridge_available && current?.bridge_resource_path;
 
-  const bridgeOk = bridgeStatus?.webui_available && bridgeStatus?.bridge_available;
-  const bridgeLabel = bridgeOk ? `已连接 v${bridgeStatus.bridge_version || ''}` : bridgeStatus?.webui_available ? 'REAPER 已连接，Bridge 未运行' : 'REAPER Web Interface 未连接';
+  const steps = [
+    { title: '打开目标 REAPER 并启用 WebUI', done: Boolean(current?.webui_available) },
+    { title: '在当前 REAPER 中运行 Bridge 安装脚本', done: Boolean(current?.bridge_available) && state !== 'NEED_REPAIR' },
+    { title: '确认并保存当前 REAPER', done: state === 'READY' },
+  ];
 
-  return <div className="max-w-2xl mx-auto"><h1 className="text-2xl font-bold text-white mb-6">设置 / 信息</h1><div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 mb-6"><h3 className="text-sm font-bold text-slate-200 mb-4">REAPER Bridge</h3><div className={`rounded-xl border p-4 mb-4 ${bridgeOk ? 'bg-emerald-500/10 border-emerald-500/25' : 'bg-amber-500/10 border-amber-500/25'}`}><div className="flex items-center justify-between"><div className="flex items-center space-x-3"><Radio size={18} className={bridgeOk ? 'text-emerald-400' : 'text-amber-400'} /><div><div className="text-sm font-bold text-slate-200">{bridgeLabel}</div><div className="text-xs text-slate-500 mt-1">保存胶囊默认通过 Bridge 后台执行，不会主动切换到 REAPER。</div></div></div><button onClick={refreshBridgeStatus} disabled={checkingBridge} className="px-3 py-2 text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg disabled:opacity-40">{checkingBridge ? '检测中…' : '重新检测'}</button></div>{bridgeStatus?.error && <div className="mt-3 text-xs text-amber-300 flex items-start space-x-2"><AlertTriangle size={14} className="mt-0.5 shrink-0" /><span>{bridgeStatus.error}</span></div>}</div><button onClick={handleInstallBridge} disabled={installingBridge} className="w-full px-4 py-3 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl disabled:opacity-40 flex items-center justify-center space-x-2"><DownloadCloud size={16} /><span>{installingBridge ? '正在安装…' : '安装 / 启动 REAPER Bridge'}</span></button><p className="text-xs text-slate-500 mt-3 leading-relaxed">首次使用：打开 REAPER，并启用 Web Interface（默认端口 9000），然后点击安装。安装后 bridge 会写入 REAPER 启动脚本，以后打开 REAPER 会自动运行。</p></div><div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 mb-6"><h3 className="text-sm font-bold text-slate-200 mb-4">REAPER 路径</h3><div className="flex items-center space-x-3"><input value={reaperPath} onChange={(e) => setReaperPath(e.target.value)} placeholder="例如：/Applications/REAPER.app 或留空自动检测" className="flex-1 bg-[#0f1115] border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-indigo-500" /><button onClick={handleSaveReaperPath} disabled={saving} className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg disabled:opacity-40">{saving ? '保存中…' : '保存'}</button></div><p className="text-xs text-slate-500 mt-2">macOS 填 .app 路径即可；Windows 填 reaper.exe 路径。</p></div><div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 space-y-3 text-sm"><Row k="API 地址" v={apiBase} /><Row k="主机名" v={networkInfo?.hostname} /><Row k="主 IP" v={networkInfo?.ip} /><Row k="监听端口" v={networkInfo?.port} /><Row k="所有 IP" v={(networkInfo?.all_ips || []).join('  ·  ')} /><Row k="共享密钥" v={networkInfo?.shared_token_required ? '已启用' : '未启用'} /></div><p className="text-xs text-slate-500 mt-4 leading-relaxed">提示：仅在你信任的局域网内运行。若启用了共享密钥，发送方需在请求头携带相同的 <code className="text-slate-300">X-Capsule-Token</code>。</p></div>;
+  return (
+    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-6">
+      <div className="w-full max-w-3xl max-h-[88vh] overflow-y-auto custom-scrollbar bg-[#161920] border border-slate-700 rounded-2xl shadow-2xl">
+        <div className="sticky top-0 bg-[#161920] border-b border-slate-800 p-5 flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-xl font-bold text-white">REAPER Setup Wizard</h2>
+            <p className="text-sm text-slate-500 mt-1">{current?.setup_message || '按步骤完成 REAPER 设置。'}</p>
+          </div>
+          <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-200"><X size={18} /></button>
+        </div>
+
+        <div className="p-5">
+          <div className="grid grid-cols-3 gap-3 mb-6">
+            {steps.map((step, index) => (
+              <div key={step.title} className={`border rounded-xl p-3 ${step.done ? 'border-emerald-500/30 bg-emerald-500/10' : index === currentStep ? 'border-indigo-500/40 bg-indigo-500/10' : 'border-slate-800 bg-[#0f1115]'}`}>
+                <div className="flex items-center gap-2">
+                  <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${step.done ? 'bg-emerald-500 text-white' : index === currentStep ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-500'}`}>{step.done ? <Check size={13} /> : index + 1}</div>
+                  <div className="text-xs font-semibold text-slate-200 leading-tight">{step.title}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {currentStep === 0 && (
+            <div className="space-y-4">
+              <div className="bg-[#0f1115] border border-slate-800 rounded-xl p-5">
+                <h3 className="text-sm font-bold text-slate-100 mb-3">1. 打开你真正要用于 Capsule Transfer 的 REAPER</h3>
+                <div className="text-sm text-slate-400 leading-7">
+                  Windows 用户请打开目标 REAPER，不要打开其他 portable / 测试版本。然后在 REAPER 中进入：
+                  <div className="mt-2 font-mono text-xs text-slate-200 bg-black/20 border border-slate-800 rounded-lg p-3">Options → Preferences → Control/OSC/Web → Add → Web browser interface → Port {port}</div>
+                </div>
+                <div className="flex items-center gap-3 mt-4">
+                  <input value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, '').slice(0, 5))} className="w-28 bg-[#161920] border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200" />
+                  <button onClick={savePortAndRefresh} className="px-4 py-2 text-sm bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg">保存端口并检测</button>
+                  <button onClick={refresh} disabled={checking} className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg disabled:opacity-40">{checking ? '检测中...' : '重新检测'}</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {currentStep === 1 && (
+            <div className="space-y-4">
+              <div className="bg-[#0f1115] border border-slate-800 rounded-xl p-5">
+                <h3 className="text-sm font-bold text-slate-100 mb-3">2. 在当前 REAPER 中运行安装脚本</h3>
+                <div className="text-sm text-slate-400 leading-7">
+                  在 REAPER 中进入 Actions，选择 Load ReaScript，加载并运行：
+                  <div className="mt-2 font-mono text-xs text-slate-200 bg-black/20 border border-slate-800 rounded-lg p-3 break-all">{current?.installer_script || 'install_capsule_bridge.lua'}</div>
+                  运行后 Bridge 会写入当前 REAPER 的启动脚本，以后打开这个 REAPER 会自动运行。
+                </div>
+                <div className="flex flex-wrap items-center gap-3 mt-4">
+                  <button onClick={openScriptFolder} className="px-4 py-2 text-sm bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg flex items-center gap-2"><FolderOpen size={15} />打开脚本所在文件夹</button>
+                  <button onClick={refresh} disabled={checking} className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg disabled:opacity-40">{checking ? '检测中...' : '我已运行，重新检测'}</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {currentStep === 2 && (
+            <div className="space-y-4">
+              {state === 'MISMATCHED_REAPER' && <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 text-sm text-amber-200">当前连接的 REAPER 与上次保存的资源目录不同。若这不是你要使用的 REAPER，请关闭错误实例并打开正确的 REAPER 后重新检测。</div>}
+              <div className="bg-[#0f1115] border border-slate-800 rounded-xl p-5 space-y-3 text-sm">
+                <h3 className="text-sm font-bold text-slate-100 mb-3">3. 确认这是目标 REAPER</h3>
+                <Row k="版本" v={current?.bridge_app_version} />
+                <Row k="程序位置" v={current?.bridge_exe_path} />
+                <Row k="资源目录" v={current?.bridge_resource_path} />
+                <Row k="已保存资源目录" v={current?.confirmed_reaper_resource_path} />
+              </div>
+              <div className="flex flex-wrap items-center justify-end gap-3">
+                <button onClick={refresh} disabled={checking} className="px-4 py-2 text-sm bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg disabled:opacity-40">{checking ? '检测中...' : '重新检测'}</button>
+                <button onClick={confirmCurrentReaper} disabled={!canConfirm} className="px-5 py-2 text-sm bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg disabled:opacity-40">确认并保存设置</button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function Row({ k, v }) {

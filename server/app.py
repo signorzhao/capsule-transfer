@@ -825,6 +825,99 @@ def download_bundle(cap_id: str):
 
 # ---------------------- Reaper 捕获 ----------------------
 
+def _normalize_reaper_identity_path(value: str | None) -> str:
+    normalized = str(value or "").strip().replace("\\", "/").rstrip("/")
+    return normalized.lower() if platform.system() == "Windows" else normalized
+
+
+def _desired_bridge_version() -> str:
+    bridge_script = _DATA_PIPELINE / "lua_scripts" / "capsule_bridge.lua"
+    try:
+        bridge_text = bridge_script.read_text("utf-8", errors="ignore")
+        version_match = re.search(r'BRIDGE_VERSION\s*=\s*"([^"]+)"', bridge_text)
+        if version_match:
+            return version_match.group(1)
+    except Exception:
+        pass
+    return ""
+
+
+def _reaper_setup_state(status: dict, desired_bridge_version: str, cfg: dict) -> tuple[str, str]:
+    if not status.get("webui_available"):
+        return "NEED_WEBUI", "没有连接到 REAPER Web Interface。请打开你要用于 Capsule Transfer 的 REAPER，并启用 Web browser interface。"
+    if status.get("bridge_instance_conflict"):
+        return "NEED_REPAIR", "检测到 REAPER Bridge 多实例冲突。请关闭多余的 REAPER，重启目标 REAPER 后重新检测。"
+    if not status.get("bridge_available"):
+        return "NEED_BRIDGE_INSTALL", "REAPER Web Interface 已连接，但 Capsule Transfer Bridge 尚未运行。请在当前 REAPER 中加载并运行安装脚本。"
+    if desired_bridge_version and status.get("bridge_version") and status.get("bridge_version") != desired_bridge_version:
+        return "NEED_REPAIR", "当前 REAPER Bridge 版本不是本机应用附带的版本。请在当前 REAPER 中重新运行安装脚本。"
+
+    current_resource = status.get("bridge_resource_path") or ""
+    confirmed_resource = cfg.get("confirmed_reaper_resource_path") or ""
+    if not current_resource:
+        return "NEED_REPAIR", "Bridge 未上报 REAPER 资源目录。请重启目标 REAPER 或重新运行安装脚本。"
+    if not confirmed_resource:
+        return "NOT_CONFIGURED", "Bridge 已连接。请确认这是你要用于 Capsule Transfer 的 REAPER，并保存绑定。"
+    if _normalize_reaper_identity_path(current_resource) != _normalize_reaper_identity_path(confirmed_resource):
+        return "MISMATCHED_REAPER", "当前连接的 REAPER 资源目录与已保存设置不一致。请确认是否打开了错误的 REAPER。"
+    return "READY", "REAPER 设置已确认，可以捕获胶囊。"
+
+
+def _build_reaper_bridge_status(webui_port: int | None = None) -> dict:
+    cfg = load_config()
+    port = int(webui_port or cfg.get("webui_port", 9000))
+    diagnostics = {}
+    try:
+        from exporters.reaper_bridge_client import ReaperBridgeClient
+        client = ReaperBridgeClient(port=port)
+        status = client.status().as_dict()
+        try:
+            diagnostics = json.loads(client._diagnostics())
+        except Exception:
+            diagnostics = {}
+    except Exception as exc:
+        status = {"webui_available": False, "bridge_available": False, "error": str(exc)}
+
+    path_manager = {}
+    try:
+        pm = PathManager.get_instance()
+        path_manager = {
+            "export_dir": str(pm.export_dir),
+            "resource_dir": str(pm.resource_dir),
+            "lua_scripts_dir": str(pm.lua_scripts_dir),
+        }
+    except Exception:
+        pass
+
+    lua_dir = _DATA_PIPELINE / "lua_scripts"
+    desired_bridge_version = _desired_bridge_version()
+    status.update(diagnostics)
+    state, message = _reaper_setup_state(status, desired_bridge_version, cfg)
+    status.update({
+        "app_dir": str(APP_DIR),
+        "data_dir": str(DATA_DIR),
+        "capsules_dir": str(CAPSULES_DIR),
+        "data_pipeline_dir": str(_DATA_PIPELINE),
+        "webui_port": port,
+        "bridge_script": str(lua_dir / "capsule_bridge.lua"),
+        "installer_script": str(lua_dir / "install_capsule_bridge.lua"),
+        "installer_dir": str(lua_dir),
+        "desired_bridge_version": desired_bridge_version,
+        "path_manager": path_manager,
+        "env_export_dir": os.environ.get("CAPSULE_TRANSFER_EXPORT_DIR", ""),
+        "setup_state": state,
+        "setup_message": message,
+        "setup_confirmed": state == "READY",
+        "can_capture": state == "READY",
+        "confirmed_reaper_exe_path": cfg.get("confirmed_reaper_exe_path", ""),
+        "confirmed_reaper_resource_path": cfg.get("confirmed_reaper_resource_path", ""),
+        "confirmed_reaper_app_version": cfg.get("confirmed_reaper_app_version", ""),
+        "confirmed_at": cfg.get("reaper_setup_confirmed_at", ""),
+        "last_setup_state": cfg.get("reaper_setup_state", ""),
+    })
+    return status
+
+
 @app.route("/api/capsules/webui-export", methods=["OPTIONS", "POST"])
 def webui_export():
     if request.method == "OPTIONS":
@@ -848,6 +941,34 @@ def webui_export():
     os.environ["SYNESTH_CAPSULE_OUTPUT"] = export_dir
 
     logger.info("Reaper bridge export: type=%s preview=%s dir=%s", capsule_type, render_preview, export_dir)
+
+    preflight = _build_reaper_bridge_status(webui_port)
+    if preflight.get("setup_state") != "READY":
+        return jsonify({
+            "success": False,
+            "error": preflight.get("setup_message") or "REAPER 设置未完成。",
+            "data": {
+                "needs_setup": True,
+                "setup_state": preflight.get("setup_state"),
+                "bridge_status": preflight,
+            },
+        }), 400
+
+    selected_count = preflight.get("selected_item_count")
+    try:
+        selected_count_int = int(selected_count)
+    except (TypeError, ValueError):
+        selected_count_int = None
+    if selected_count_int is not None and selected_count_int <= 0:
+        return jsonify({
+            "success": False,
+            "error": "请先在 REAPER 中选中要保存为胶囊的 Item。",
+            "data": {
+                "selected_items_required": True,
+                "setup_state": preflight.get("setup_state"),
+                "bridge_status": preflight,
+            },
+        }), 400
 
     if not _REAPER_CAPTURE_LOCK.acquire(blocking=False):
         return _err("已有 Reaper 捕获在进行中，请等待完成后再试", 429)
@@ -970,49 +1091,10 @@ def webui_export():
 
 def reaper_bridge_status():
     webui_port = int(request.args.get("webui_port") or load_config().get("webui_port", 9000))
-    try:
-        from exporters.reaper_bridge_client import ReaperBridgeClient
-        client = ReaperBridgeClient(port=webui_port)
-        status = client.status().as_dict()
-        try:
-            diagnostics = json.loads(client._diagnostics())
-        except Exception:
-            diagnostics = {}
-    except Exception as exc:
-        status = {"webui_available": False, "bridge_available": False, "error": str(exc)}
-        diagnostics = {}
-
-    path_manager = {}
-    try:
-        pm = PathManager.get_instance()
-        path_manager = {
-            "export_dir": str(pm.export_dir),
-            "resource_dir": str(pm.resource_dir),
-            "lua_scripts_dir": str(pm.lua_scripts_dir),
-        }
-    except Exception:
-        pass
-
-    desired_bridge_version = ""
-    bridge_script = _DATA_PIPELINE / "lua_scripts" / "capsule_bridge.lua"
-    try:
-        bridge_text = bridge_script.read_text("utf-8", errors="ignore")
-        version_match = re.search(r'BRIDGE_VERSION\s*=\s*"([^"]+)"', bridge_text)
-        if version_match:
-            desired_bridge_version = version_match.group(1)
-    except Exception:
-        pass
-
-    status.update(diagnostics)
-    status.update({
-        "app_dir": str(APP_DIR),
-        "data_dir": str(DATA_DIR),
-        "capsules_dir": str(CAPSULES_DIR),
-        "data_pipeline_dir": str(_DATA_PIPELINE),
-        "desired_bridge_version": desired_bridge_version,
-        "path_manager": path_manager,
-        "env_export_dir": os.environ.get("CAPSULE_TRANSFER_EXPORT_DIR", ""),
-    })
+    status = _build_reaper_bridge_status(webui_port)
+    cfg = load_config()
+    cfg["reaper_setup_state"] = status.get("setup_state", "")
+    save_config(cfg)
     return _ok(status)
 
 
@@ -1024,6 +1106,56 @@ def reaper_bridge_ping():
         return _ok(result)
     except Exception as exc:
         return _err(str(exc), 500)
+
+
+@app.route("/api/reaper/bridge/confirm", methods=["POST"])
+def confirm_reaper_bridge():
+    webui_port = int((request.get_json(silent=True) or {}).get("webui_port") or load_config().get("webui_port", 9000))
+    status = _build_reaper_bridge_status(webui_port)
+    if not status.get("webui_available") or not status.get("bridge_available"):
+        return _err(status.get("setup_message") or "当前 REAPER 尚未准备好，不能保存绑定。", 400)
+    if status.get("setup_state") in {"NEED_WEBUI", "NEED_BRIDGE_INSTALL", "NEED_REPAIR"}:
+        return _err(status.get("setup_message") or "当前 REAPER 设置仍需修复，不能保存绑定。", 400)
+    resource_path = status.get("bridge_resource_path") or ""
+    if not resource_path:
+        return _err("Bridge 未上报 REAPER 资源目录，不能保存绑定。", 400)
+
+    cfg = load_config()
+    cfg.update({
+        "confirmed_reaper_exe_path": status.get("bridge_exe_path") or "",
+        "confirmed_reaper_resource_path": resource_path,
+        "confirmed_reaper_app_version": status.get("bridge_app_version") or "",
+        "webui_port": webui_port,
+        "reaper_setup_state": "READY",
+        "reaper_setup_confirmed_at": _now_iso(),
+    })
+    save_config(cfg)
+    confirmed = _build_reaper_bridge_status(webui_port)
+    return _ok(confirmed, message="已确认当前 REAPER 设置")
+
+
+@app.route("/api/reaper/bridge/script-folder", methods=["POST"])
+def open_reaper_bridge_script_folder():
+    lua_dir = _DATA_PIPELINE / "lua_scripts"
+    installer = lua_dir / "install_capsule_bridge.lua"
+    if not lua_dir.exists():
+        return _err(f"脚本目录不存在: {lua_dir}", 404)
+    try:
+        if platform.system() == "Darwin":
+            subprocess.Popen(["open", str(lua_dir)])
+        elif platform.system() == "Windows":
+            subprocess.Popen(
+                ["explorer.exe", str(lua_dir)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            _windows_raise_window([lua_dir.name, str(lua_dir), "File Explorer", "资源管理器"], ["explorer"], delay_ms=350, attempts=20)
+        else:
+            subprocess.Popen(["xdg-open", str(lua_dir)])
+    except Exception as e:
+        return _err(f"打开脚本目录失败: {e}", 500)
+    return _ok({"folder": str(lua_dir), "installer_script": str(installer)}, message="已打开脚本目录")
 
 
 if "reaper_bridge_status" in app.view_functions:
@@ -1377,8 +1509,6 @@ def get_settings():
 def update_settings():
     data = request.get_json(silent=True) or {}
     cfg = load_config()
-    if "reaper_path" in data:
-        cfg["reaper_path"] = data["reaper_path"]
     if "webui_port" in data:
         cfg["webui_port"] = int(data["webui_port"])
     if "port" in data:

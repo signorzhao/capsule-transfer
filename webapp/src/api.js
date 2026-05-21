@@ -53,7 +53,9 @@ export const api = {
 
   getReaperBridgeStatus: () => jsonFetch('/reaper/bridge/status'),
   pingReaperBridge: () => jsonFetch('/reaper/bridge/ping', { method: 'POST' }),
-  installReaperBridge: () => jsonFetch('/reaper/bridge/install', { method: 'POST' }),
+  confirmReaperBridge: (payload = {}) =>
+    jsonFetch('/reaper/bridge/confirm', { method: 'POST', body: JSON.stringify(payload) }),
+  openReaperBridgeScriptFolder: () => jsonFetch('/reaper/bridge/script-folder', { method: 'POST' }),
 
   getSettings: () => jsonFetch('/settings'),
   updateSettings: (payload) =>

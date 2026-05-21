@@ -1,3 +1,8 @@
 {
-  "reaper_path": ""
+  "reaper_setup_state": "READY",
+  "confirmed_reaper_exe_path": "/Applications",
+  "confirmed_reaper_resource_path": "/Users/ianzhao/Library/Application Support/REAPER",
+  "confirmed_reaper_app_version": "7.58/macOS-arm64",
+  "webui_port": 9000,
+  "reaper_setup_confirmed_at": "2026-05-21T15:19:44+00:00"
 }

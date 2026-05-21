@@ -12,13 +12,10 @@ compatibility setting, but the safe bridge path is the production default.
 
 from __future__ import annotations
 
-import json
-import os
 import platform
-import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 
 def get_export_temp_dir() -> Path:
@@ -60,67 +57,6 @@ class ReaperWebUIExporter:
             return response.status_code == 200
         except Exception:
             return False
-
-    def _find_reaper_executable(self) -> Optional[Path]:
-        """Find REAPER executable for diagnostics/install flows, not export."""
-        system = platform.system()
-
-        config_candidates = []
-        if system == "Darwin":
-            config_candidates = [
-                Path.home() / "Library/Application Support/CapsuleTransfer/config.json",
-                Path.home() / "Library/Application Support/com.soundcapsule.app/config.json",
-            ]
-        elif system == "Windows":
-            appdata = os.environ.get("APPDATA", str(Path.home() / "AppData/Roaming"))
-            config_candidates = [
-                Path(appdata) / "CapsuleTransfer/config.json",
-                Path(appdata) / "com.soundcapsule.app/config.json",
-            ]
-        else:
-            config_candidates = [
-                Path.home() / ".config/CapsuleTransfer/config.json",
-                Path.home() / ".config/com.soundcapsule.app/config.json",
-            ]
-
-        for config_path in config_candidates:
-            try:
-                if config_path.exists():
-                    config = json.loads(config_path.read_text("utf-8"))
-                    reaper_path = config.get("reaper_path")
-                    if reaper_path:
-                        reaper_exe = Path(reaper_path)
-                        if reaper_exe.is_dir() and reaper_exe.suffix == ".app":
-                            reaper_exe = reaper_exe / "Contents" / "MacOS" / "REAPER"
-                        if reaper_exe.exists() and reaper_exe.is_file():
-                            return reaper_exe
-            except Exception:
-                pass
-
-        if system == "Darwin":
-            paths = [
-                Path("/Applications/REAPER.app/Contents/MacOS/REAPER"),
-                Path("/Applications/REAPER64.app/Contents/MacOS/REAPER"),
-                Path.home() / "Applications/REAPER.app/Contents/MacOS/REAPER",
-            ]
-        elif system == "Windows":
-            paths = [
-                Path("C:/Program Files/REAPER (x64)/reaper.exe"),
-                Path("C:/Program Files/REAPER (arm64)/reaper.exe"),
-                Path("C:/Program Files/REAPER/reaper.exe"),
-                Path("C:/Program Files (x86)/REAPER/reaper.exe"),
-                Path.home() / "AppData/Local/Programs/REAPER/reaper.exe",
-            ]
-        else:
-            reaper_in_path = shutil.which("reaper")
-            if reaper_in_path:
-                return Path(reaper_in_path)
-            paths = [Path("/usr/bin/reaper")]
-
-        for path in paths:
-            if path.exists():
-                return path
-        return None
 
     def prepare_export_config(self, config: Dict[str, Any]) -> bool:
         """Validate export config paths for compatibility with old callers."""
