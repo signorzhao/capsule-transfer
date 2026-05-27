@@ -1324,6 +1324,7 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
     
     local keepTrackNumbers = {}
     local selectedItemGUIDs = {}  -- 用于 RPP 中按 IGUID 精确匹配
+    local allowTimeOverlapItemFilter = false  -- 仅 Folder Item 需要用时间范围兜底收集子 Item
     local numItems = reaper.CountSelectedMediaItems(0)
     for i = 0, numItems - 1 do
         local item = reaper.GetSelectedMediaItem(0, i)
@@ -1348,6 +1349,7 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
                 local folderDepth = reaper.GetMediaTrackInfo_Value(itemTrack, "I_FOLDERDEPTH")
                 local take = reaper.GetActiveTake(item)
                 if folderDepth == 1 and not take then
+                    allowTimeOverlapItemFilter = true
                     local folderStart = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
                     local folderEnd = folderStart + reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
                     reaper.ShowConsoleMsg(string.format("  Folder Item 时间范围: %.2f - %.2f，收集子 Item...\n", folderStart, folderEnd))
@@ -1502,8 +1504,8 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
                 if iguid and selectedItemGUIDs[iguid:lower()] then
                     keepItem = true
                 end
-                -- 方法 2：时间范围重叠（覆盖 folder 子 item 和所有保留轨道上的 item）
-                if not keepItem and startTime and endTime then
+                -- 方法 2：时间范围重叠（仅 Folder Item 的子 Item 兜底）
+                if not keepItem and allowTimeOverlapItemFilter and startTime and endTime then
                     local itemPos = tonumber(itemContent:match("POSITION%s+([%d%.%-]+)"))
                     local itemLen = tonumber(itemContent:match("LENGTH%s+([%d%.%-]+)"))
                     if itemPos and itemLen then
@@ -1513,14 +1515,10 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
                         end
                     end
                 end
-                -- 方法 3：MIDI 或媒体文件名匹配（兜底）
+                -- 方法 3：媒体文件名匹配（音频兜底）。MIDI 必须依赖 IGUID，避免保留未选中的 MIDI Item。
                 if not keepItem then
-                    if itemContent:lower():find("source midi", 1, true) then
-                        keepItem = true
-                    else
-                        for mediaName, _ in pairs(selectedMediaNames) do
-                            if itemContent:lower():find(mediaName, 1, true) then keepItem = true; break end
-                        end
+                    for mediaName, _ in pairs(selectedMediaNames) do
+                        if itemContent:lower():find(mediaName, 1, true) then keepItem = true; break end
                     end
                 end
                 if keepItem then
@@ -3150,62 +3148,42 @@ function ExportCapsule()
     GenerateCapsuleMetadata(outputDir, capsuleName, capsuleType, collectedItemsInfo, mediaFiles, failedFiles)
     BridgePhase("saving capsule: done")
     
-    -- 步骤 5：渲染预览音频（使用 -renderproject 命令）
+    -- 步骤 5：渲染预览音频（当前 REAPER 实例内临时标签页；不启动第二个 REAPER）
     if exportPreview then
         BridgePhase("rendering preview: starting")
-        reaper.ShowConsoleMsg("\n=== 渲染预览音频 ===\n")
+        reaper.ShowConsoleMsg("\n=== 渲染预览音频（进程内临时标签页）===\n")
 
-        local reaperPath = nil
-        if IsWindows() then
-            if reaper.GetExePath then
-                local exePath = reaper.GetExePath()
-                if exePath and exePath ~= "" then
-                    local candidates = {
-                        exePath,
-                        JoinPath(exePath, "reaper.exe"),
-                    }
-                    for _, path in ipairs(candidates) do
-                        local f = io.open(path, "r")
-                        if f then
-                            f:close()
-                            reaperPath = path
-                            break
-                        end
-                    end
-                end
-            end
+        local origProj = reaper.EnumProjects(-1)
+        local openedRenderTab = false
+        local rewriteOk = RewriteRppRenderOutputToCurrentDir(rppPath, capsuleName)
+        local ok, renderErr = pcall(function()
+            reaper.Main_OnCommand(41929, 0)  -- File: New project tab (ignore default template)
+            openedRenderTab = true
+            reaper.Main_openProject(rppPath)
+            reaper.Main_OnCommand(42230, 0)  -- File: Render project, using the most recent render settings, auto-close
+        end)
 
-            if not reaperPath then
-                local possiblePaths = {
-                    "C:\\My Audio Tools\\REAPER\\reaper.exe",
-                    "C:\\Program Files\\REAPER (x64)\\reaper.exe",
-                    "C:\\Program Files\\REAPER (arm64)\\reaper.exe",
-                    "C:\\Program Files\\REAPER\\reaper.exe",
-                    "C:\\Program Files (x86)\\REAPER\\reaper.exe",
-                }
-                for _, path in ipairs(possiblePaths) do
-                    local f = io.open(path, "r")
-                    if f then
-                        f:close()
-                        reaperPath = path
-                        break
-                    end
+        if openedRenderTab and reaper.EnumProjects(-1) ~= origProj then
+            reaper.Main_OnCommand(40860, 0)  -- File: Close current project tab
+        end
+        if reaper.EnumProjects(-1) ~= origProj then
+            for i = 0, 99 do
+                local proj = reaper.EnumProjects(i)
+                if not proj then break end
+                if proj == origProj then
+                    reaper.SelectProjectInstance(proj)
+                    break
                 end
             end
         end
 
-        if reaperPath then
-            -- Render through a Windows helper that launches a separate minimized
-            -- REAPER process and restores the user's foreground window, matching
-            -- the macOS focus-safe render helper behavior.
-            local rewriteOk = RewriteRppRenderOutputToCurrentDir(rppPath, capsuleName)
-            local renderResult = RunWindowsBackgroundRender(reaperPath, rppPath, outputDir, 190000)
-            reaper.SetExtState("capsule_transfer", "preview_render_debug", "reaper=" .. tostring(reaperPath) .. "; rpp=" .. tostring(rppPath) .. "; output_dir=" .. tostring(outputDir) .. "; rewrite_ok=" .. tostring(rewriteOk) .. "; result=" .. tostring(renderResult), false)
-            reaper.ShowConsoleMsg("✓ 渲染命令已完成，返回: " .. tostring(renderResult) .. "\n")
+        reaper.SetExtState("capsule_transfer", "preview_render_debug", "mode=current-instance-tab; rpp=" .. tostring(rppPath) .. "; output_dir=" .. tostring(outputDir) .. "; rewrite_ok=" .. tostring(rewriteOk) .. "; ok=" .. tostring(ok) .. "; error=" .. tostring(renderErr or ""), false)
+        if ok then
+            reaper.ShowConsoleMsg("✓ 预览渲染已在当前实例完成\n")
             BridgePhase("rendering preview: finished")
         else
-            reaper.ShowConsoleMsg("⚠ 未找到 REAPER，请手动渲染\n")
-            BridgePhase("rendering preview: skipped no reaper")
+            reaper.ShowConsoleMsg("⚠ 预览渲染失败: " .. tostring(renderErr) .. "\n")
+            BridgePhase("rendering preview: skipped render error")
         end
     end
     

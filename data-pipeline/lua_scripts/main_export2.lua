@@ -795,6 +795,7 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
     reaper.ShowConsoleMsg("收集需要保留的轨道...\n")
     local keepTrackNumbers = {}
     local selectedItemGUIDs = {}
+    local allowTimeOverlapItemFilter = false  -- 仅 Folder Item 需要用时间范围兜底收集子 Item
     local numItems = reaper.CountSelectedMediaItems(0)
     for i = 0, numItems - 1 do
         local item = reaper.GetSelectedMediaItem(0, i)
@@ -819,6 +820,7 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
                 local folderDepth = reaper.GetMediaTrackInfo_Value(itemTrack, "I_FOLDERDEPTH")
                 local take = reaper.GetActiveTake(item)
                 if folderDepth == 1 and not take then
+                    allowTimeOverlapItemFilter = true
                     local folderStart = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
                     local folderEnd = folderStart + reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
                     reaper.ShowConsoleMsg(string.format("  Folder Item 时间范围: %.2f - %.2f，收集子 Item...\n", folderStart, folderEnd))
@@ -930,7 +932,7 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
     end
 
     -- 删除未选中的 ITEM 块
-    -- 策略：保留通过 GUID 匹配的 item + 时间范围与选区重叠的 item（覆盖 folder 子 item）
+    -- 策略：保留通过 GUID 匹配的 item；Folder Item 用时间范围兜底保留子 item；音频用文件名兜底
     reaper.ShowConsoleMsg("清理未选中的 Items...\n")
     reaper.ShowConsoleMsg(string.format("  时间选区: %.4f - %.4f\n", startTime, endTime))
     local selectedMediaNames = {}
@@ -960,8 +962,8 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
                 if iguid and selectedItemGUIDs[iguid:lower()] then
                     keepItem = true
                 end
-                -- 方法 2：时间范围重叠（覆盖 folder 子 item 和所有保留轨道上的 item）
-                if not keepItem and startTime and endTime then
+                -- 方法 2：时间范围重叠（仅 Folder Item 的子 Item 兜底）
+                if not keepItem and allowTimeOverlapItemFilter and startTime and endTime then
                     local itemPos = tonumber(itemContent:match("POSITION%s+([%d%.%-]+)"))
                     local itemLen = tonumber(itemContent:match("LENGTH%s+([%d%.%-]+)"))
                     if itemPos and itemLen then
@@ -971,14 +973,10 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
                         end
                     end
                 end
-                -- 方法 3：MIDI 或媒体文件名匹配（兜底）
+                -- 方法 3：媒体文件名匹配（音频兜底）。MIDI 必须依赖 IGUID，避免保留未选中的 MIDI Item。
                 if not keepItem then
-                    if itemContent:lower():find("source midi", 1, true) then
-                        keepItem = true
-                    else
-                        for mediaName, _ in pairs(selectedMediaNames) do
-                            if itemContent:lower():find(mediaName, 1, true) then keepItem = true; break end
-                        end
+                    for mediaName, _ in pairs(selectedMediaNames) do
+                        if itemContent:lower():find(mediaName, 1, true) then keepItem = true; break end
                     end
                 end
                 if keepItem then newContent = newContent .. itemContent

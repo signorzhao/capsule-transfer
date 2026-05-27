@@ -12,10 +12,48 @@ compatibility setting, but the safe bridge path is the production default.
 
 from __future__ import annotations
 
+import json
 import platform
 import tempfile
 from pathlib import Path
 from typing import Any, Dict
+
+
+def _json_object(value: str | None) -> Dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _recover_success_from_diagnostics(diagnostics: str) -> Dict[str, Any] | None:
+    fields = _json_object(diagnostics)
+    last_command = _json_object(fields.get("last_command_debug"))
+    request_id = last_command.get("request_id")
+    if not request_id:
+        return None
+    for key in ("result_v2", "result", "last_result_debug"):
+        result = _json_object(fields.get(key))
+        if result.get("request_id") == request_id and result.get("success") is True:
+            result.setdefault("mode", "bridge")
+            return result
+    return None
+
+
+def _recover_success_from_client(client: Any) -> Dict[str, Any] | None:
+    last_command = _json_object(client.get_extstate_best_effort("last_command_debug", timeout=15.0))
+    request_id = last_command.get("request_id")
+    if not request_id:
+        return None
+    for key in ("result_v2", "result", "last_result_debug"):
+        result = _json_object(client.get_extstate_best_effort(key, timeout=15.0))
+        if result.get("request_id") == request_id and result.get("success") is True:
+            result.setdefault("mode", "bridge")
+            return result
+    return None
 
 
 def get_export_temp_dir() -> Path:
@@ -102,8 +140,14 @@ class ReaperWebUIExporter:
             bridge_status: Dict[str, Any] = {}
             try:
                 client = ReaperBridgeClient(port=self.port)
+                recovered = _recover_success_from_client(client)
+                if recovered:
+                    return recovered
                 bridge_status = client.status().as_dict()
                 diagnostics = client._diagnostics()
+                recovered = _recover_success_from_diagnostics(diagnostics)
+                if recovered:
+                    return recovered
             except Exception:
                 pass
             return {

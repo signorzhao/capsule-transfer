@@ -275,9 +275,30 @@ class ReaperBridgeClient:
         self.set_extstate("export_phase", "python sending command")
         self.set_extstate("last_command_debug", json.dumps(command, ensure_ascii=False))
         self.set_extstate(command_key, json.dumps(command, ensure_ascii=False))
-        result = self._wait_for_result(request_id, timeout=timeout, result_key=result_key)
+        try:
+            result = self._wait_for_result(request_id, timeout=timeout, result_key=result_key)
+        except Exception:
+            recovered = self._read_matching_success_result(request_id, result_key=result_key)
+            if recovered:
+                result = recovered
+            else:
+                raise
         result.setdefault("mode", "bridge")
         return result
+
+    def _read_matching_success_result(self, request_id: str, result_key: str = "result") -> Optional[Dict[str, Any]]:
+        for key in (result_key, "result_v2", "result", "last_result_debug"):
+            raw = self.get_extstate_best_effort(key, timeout=15.0)
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if data.get("request_id") == request_id and data.get("success") is True:
+                data.setdefault("mode", "bridge")
+                return data
+        return None
 
     def _diagnostics(self) -> str:
         fields = {}
