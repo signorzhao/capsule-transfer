@@ -16,4 +16,133 @@ body {
 
 .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
 .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-.custom-scrollbar::-webkit-scrollbar-thumb { background: #2d333f; border-radius: 10px; }
+.custom-scrollbar::-webkit-scrollbar-thumb { background: #2a3134; border-radius: 10px; }
+
+:root {
+  --graphite-page: #111417;
+  --graphite-sidebar: #0d1114;
+  --graphite-panel: #181d1f;
+  --graphite-panel-strong: #202527;
+  --graphite-table: #101417;
+  --graphite-hover: #1d2325;
+  --graphite-border: #2a3134;
+  --graphite-border-strong: #3b464b;
+  --graphite-text: #d8e1e5;
+  --graphite-text-soft: #a8b0b4;
+  --graphite-text-muted: #727b80;
+  --graphite-primary: #2d6684;
+  --graphite-primary-soft: #17242b;
+  --graphite-primary-softer: #132027;
+  --graphite-success: #6f98b5;
+  --graphite-warning: #b58f52;
+  --graphite-danger: #b76a68;
+}
+
+body {
+  background: var(--graphite-page);
+}
+
+/* Capsule LAN graphite theme. These overrides remap the existing Tailwind
+   palette without changing component behavior or layout. */
+.bg-\[\#0f1115\] { background-color: var(--graphite-page) !important; }
+.bg-\[\#161920\] { background-color: var(--graphite-sidebar) !important; }
+.bg-\[\#11151b\] { background-color: var(--graphite-table) !important; }
+.bg-\[\#151a21\] { background-color: var(--graphite-panel-strong) !important; }
+.bg-\[\#171d25\] { background-color: var(--graphite-hover) !important; }
+.bg-\[\#1a1d24\] { background-color: var(--graphite-panel) !important; }
+
+.bg-slate-900 { background-color: var(--graphite-table) !important; }
+.bg-slate-800,
+.bg-slate-800\/40,
+.bg-slate-800\/50 { background-color: var(--graphite-panel-strong) !important; }
+.bg-slate-700,
+.bg-slate-700\/40 { background-color: var(--graphite-border) !important; }
+
+.hover\:bg-slate-800:hover,
+.hover\:bg-slate-800\/70:hover { background-color: var(--graphite-hover) !important; }
+.hover\:bg-slate-700:hover,
+.hover\:bg-slate-600:hover { background-color: var(--graphite-border-strong) !important; }
+
+.border-slate-800,
+.border-slate-800\/70 { border-color: var(--graphite-border) !important; }
+.border-slate-700,
+.border-slate-700\/70,
+.border-slate-600,
+.border-slate-600\/40 { border-color: var(--graphite-border-strong) !important; }
+
+.text-slate-100,
+.text-slate-200 { color: var(--graphite-text) !important; }
+.text-slate-300,
+.text-slate-400 { color: var(--graphite-text-soft) !important; }
+.text-slate-500,
+.text-slate-600 { color: var(--graphite-text-muted) !important; }
+.hover\:text-slate-200:hover,
+.hover\:text-slate-300:hover { color: var(--graphite-text) !important; }
+.hover\:text-slate-500:hover { color: var(--graphite-text-soft) !important; }
+
+.bg-indigo-600,
+.bg-indigo-500 { background-color: var(--graphite-primary) !important; }
+.bg-indigo-600\/5,
+.bg-indigo-500\/10,
+.bg-indigo-500\/15,
+.bg-indigo-600\/10,
+.bg-indigo-600\/20 { background-color: var(--graphite-primary-soft) !important; }
+.hover\:bg-indigo-500:hover { background-color: #347b9e !important; }
+.hover\:bg-indigo-600\/20:hover { background-color: var(--graphite-primary-softer) !important; }
+
+.text-indigo-100,
+.text-indigo-300,
+.text-indigo-400,
+.text-indigo-500 { color: var(--graphite-primary) !important; }
+.hover\:text-indigo-300:hover { color: var(--graphite-success) !important; }
+
+.border-indigo-500,
+.border-indigo-500\/25,
+.border-indigo-500\/35,
+.border-indigo-500\/40,
+.border-indigo-500\/50,
+.focus\:border-indigo-500:focus { border-color: var(--graphite-primary) !important; }
+.ring-indigo-500\/30 { --tw-ring-color: rgb(45 102 132 / 0.3) !important; }
+.shadow-indigo-600\/20,
+.shadow-indigo-600\/30,
+.shadow-sky-500\/20 { --tw-shadow-color: rgb(45 102 132 / 0.25) !important; }
+
+.bg-emerald-500,
+.bg-emerald-600 { background-color: var(--graphite-success) !important; }
+.bg-emerald-500\/10,
+.bg-emerald-500\/15,
+.bg-emerald-500\/20,
+.bg-emerald-600\/20 { background-color: rgb(111 152 181 / 0.16) !important; }
+.border-emerald-500\/20,
+.border-emerald-500\/25,
+.border-emerald-500\/30 { border-color: rgb(111 152 181 / 0.35) !important; }
+.text-emerald-300,
+.text-emerald-400,
+.text-emerald-500 { color: var(--graphite-success) !important; }
+.hover\:bg-emerald-500:hover { background-color: #7ba7c2 !important; }
+
+.bg-amber-500\/10,
+.bg-amber-500\/15,
+.bg-amber-500\/20 { background-color: rgb(181 143 82 / 0.16) !important; }
+.border-amber-500\/20,
+.border-amber-500\/25,
+.border-amber-500\/30 { border-color: rgb(181 143 82 / 0.36) !important; }
+.text-amber-200,
+.text-amber-300,
+.text-amber-300\/80,
+.text-amber-400,
+.hover\:text-amber-300:hover,
+.hover\:text-orange-300:hover { color: var(--graphite-warning) !important; }
+
+.bg-red-500,
+.hover\:bg-red-500:hover { background-color: var(--graphite-danger) !important; }
+.bg-red-500\/10,
+.bg-red-500\/15,
+.bg-red-500\/20,
+.bg-red-600\/20 { background-color: rgb(183 106 104 / 0.16) !important; }
+.border-red-500\/30 { border-color: rgb(183 106 104 / 0.38) !important; }
+.text-red-200,
+.text-red-300,
+.text-red-400,
+.hover\:text-red-400:hover { color: var(--graphite-danger) !important; }
+.hover\:text-white:hover { color: #f8fbfc !important; }

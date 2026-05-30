@@ -114,7 +114,7 @@ function Shell() {
   const [showAddContact, setShowAddContact] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [captureStatus, setCaptureStatus] = useState(null);
-  const [receiveMode, setReceiveMode] = useState('auto');
+  const [receiveMode, setReceiveMode] = useState('confirm');
   const [pendingRequests, setPendingRequests] = useState([]);
   const [showIncoming, setShowIncoming] = useState(false);
   const [bridgeStatus, setBridgeStatus] = useState(null);
@@ -194,7 +194,7 @@ function Shell() {
   }, [refreshAll]);
 
   useEffect(() => {
-    api.getReceiveMode().then((r) => setReceiveMode(r.data?.mode || 'auto')).catch(() => {});
+    api.getReceiveMode().then((r) => setReceiveMode(r.data?.mode || 'confirm')).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -513,6 +513,18 @@ function Shell() {
   };
 
   const handleChangeReceiveMode = async (mode) => {
+    if (mode === 'auto' && receiveMode !== 'auto') {
+      const firstConfirm = window.confirm('开启自动接收后，收到传输请求时不会再弹出确认窗口，胶囊会直接保存到本机。请只在可信局域网内使用。\n\n是否继续开启自动接收？');
+      if (!firstConfirm) {
+        toast.info('已取消开启自动接收');
+        return;
+      }
+      const secondConfirm = window.confirm('再次确认：自动接收会降低操作阻力，但也意味着可信网络内的发送请求会直接落盘。你可以随时切回「验证」模式。\n\n确认开启自动接收？');
+      if (!secondConfirm) {
+        toast.info('已取消开启自动接收');
+        return;
+      }
+    }
     try {
       await api.setReceiveMode(mode);
       setReceiveMode(mode);
@@ -1202,8 +1214,8 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
                   )}
                   {deleteConfirmId === selectedCapsule.id ? (
                     <div className="grid grid-cols-2 gap-2">
-                      <button title="确认删除" onClick={() => confirmDelete(selectedCapsule)} className="h-9 rounded-lg bg-red-500/15 text-red-300 hover:bg-red-500 hover:text-white text-sm">确认删除</button>
-                      <button title="取消删除" onClick={cancelDelete} className="h-9 rounded-lg bg-slate-800 text-slate-400 hover:text-slate-200 text-sm">取消</button>
+                      <button onClick={() => confirmDelete(selectedCapsule)} className="h-9 rounded-lg bg-red-500/15 text-red-300 hover:bg-red-500 hover:text-white text-sm">确认删除</button>
+                      <button onClick={cancelDelete} className="h-9 rounded-lg bg-slate-800 text-slate-400 hover:text-slate-200 text-sm">取消</button>
                     </div>
                   ) : (
                     <div className="grid grid-cols-2 gap-2">

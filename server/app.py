@@ -103,14 +103,11 @@ PORT = int(os.getenv("LAN_CAPSULE_PORT", _config.get("port", 5005)))
 HOST = os.getenv("LAN_CAPSULE_HOST", _config.get("host", "0.0.0.0"))
 SHARED_TOKEN = os.getenv("LAN_CAPSULE_SHARED_TOKEN", _config.get("shared_token", "")).strip()
 ALLOW_PUBLIC_PEERS = _truthy(os.getenv("LAN_CAPSULE_ALLOW_PUBLIC_PEERS", _config.get("allow_public_peers", False)))
-ALLOW_AUTO_RECEIVE = _truthy(os.getenv("LAN_CAPSULE_ALLOW_AUTO_RECEIVE", _config.get("allow_auto_receive", False)))
 _REAPER_CAPTURE_LOCK = threading.Lock()
 
 # receive_mode: "off" = 关闭接收, "confirm" = 验证接收, "auto" = 自动接收
 _receive_mode_lock = threading.Lock()
 _receive_mode = _config.get("receive_mode", "confirm")
-if _receive_mode == "auto" and not ALLOW_AUTO_RECEIVE:
-    _receive_mode = "confirm"
 _pending_requests: dict[str, dict] = {}
 _pending_lock = threading.Lock()
 _PENDING_TIMEOUT = 60
@@ -246,8 +243,6 @@ def _get_receive_mode() -> str:
 
 def _set_receive_mode(mode: str):
     global _receive_mode
-    if mode == "auto" and not ALLOW_AUTO_RECEIVE:
-        raise ValueError("自动接收已被默认禁用，请设置 LAN_CAPSULE_ALLOW_AUTO_RECEIVE=1 后再开启")
     with _receive_mode_lock:
         _receive_mode = mode
     cfg = load_config()
