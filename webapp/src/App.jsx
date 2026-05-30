@@ -73,6 +73,33 @@ function parseHostPort(value) {
   return { ip: match[1].replace(/^\[|\]$/g, ''), port: String(portNumber) };
 }
 
+function CapsuleLanLogo() {
+  return (
+    <div className="w-10 h-10 rounded-full flex items-center justify-center shadow-lg shadow-sky-500/20" title="Capsule LAN" aria-label="Capsule LAN">
+      <svg viewBox="0 0 40 40" className="w-10 h-10" role="img" aria-hidden="true">
+        <defs>
+          <linearGradient id="capsule-lan-logo-bg" x1="8" y1="6" x2="31" y2="34" gradientUnits="userSpaceOnUse">
+            <stop stopColor="#347b9e" />
+            <stop offset="1" stopColor="#245a76" />
+          </linearGradient>
+          <clipPath id="capsule-lan-logo-pill">
+            <rect x="-14.5" y="-5.8" width="29" height="11.6" rx="5.8" />
+          </clipPath>
+        </defs>
+        <circle cx="20" cy="20" r="20" fill="url(#capsule-lan-logo-bg)" />
+        <g transform="translate(20 20) rotate(-18)">
+          <g clipPath="url(#capsule-lan-logo-pill)">
+            <rect x="-14.5" y="-5.8" width="14.5" height="11.6" fill="#dbe7ec" />
+            <rect x="0" y="-5.8" width="14.5" height="11.6" fill="#9fb2bc" />
+          </g>
+          <rect x="-14.5" y="-5.8" width="29" height="11.6" rx="5.8" fill="none" stroke="#dbe7ec" strokeWidth="2.3" />
+          <path d="M0 -4.8v9.6" stroke="#dbe7ec" strokeWidth="2" strokeLinecap="round" />
+        </g>
+      </svg>
+    </div>
+  );
+}
+
 function Shell() {
   const toast = useToast();
   const [activeTab, setActiveTab] = useState('library');
@@ -550,7 +577,7 @@ function Shell() {
   return (
     <div className="flex h-screen bg-[#0f1115] text-slate-200 font-sans overflow-hidden">
       <aside className="w-16 bg-[#161920] border-r border-slate-800 flex flex-col items-center py-6 space-y-8">
-        <div className="w-10 h-10 bg-indigo-600 rounded-full flex items-center justify-center shadow-lg shadow-indigo-500/20"><Zap size={20} className="text-white" fill="white" /></div>
+        <CapsuleLanLogo />
         <div className="flex flex-col space-y-4">
           <NavIcon active={activeTab === 'library'} onClick={() => setActiveTab('library')} icon={<Package size={20} />} label="库" />
           <NavIcon active={activeTab === 'contacts'} onClick={() => setActiveTab('contacts')} icon={<Users size={20} />} label="联系人" />

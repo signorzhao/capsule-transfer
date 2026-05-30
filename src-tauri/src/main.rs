@@ -120,9 +120,9 @@ fn main() {
         .setup(|app| {
             let child = start_backend(app);
             if child.is_some() {
-                eprintln!("[CapsuleTransfer] Flask backend started");
+                eprintln!("[Capsule LAN] Flask backend started");
             } else {
-                eprintln!("[CapsuleTransfer] No bundled backend, expecting manual Flask");
+                eprintln!("[Capsule LAN] No bundled backend, expecting manual Flask");
             }
             app.manage(BackendProcess(Mutex::new(child)));
             Ok(())

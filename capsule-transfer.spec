@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec 文件 —— 打包 Sound Capsule LAN 为绿色版可执行文件。
+"""PyInstaller spec 文件 —— 打包 Capsule LAN 为绿色版可执行文件。
 
 使用方法：
     cd capsule-transfer
@@ -8,7 +8,7 @@
     # 打包
     pyinstaller capsule-transfer.spec
 
-产出目录 dist/CapsuleTransfer/ 即为绿色版，可直接复制分发。
+产出目录 dist/Capsule LAN/ 即为绿色版，可直接复制分发。
 """
 
 import os
@@ -52,7 +52,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='CapsuleTransfer',
+    name='Capsule LAN',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -69,5 +69,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='CapsuleTransfer',
+    name='Capsule LAN',
 )
