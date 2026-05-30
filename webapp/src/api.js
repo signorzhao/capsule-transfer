@@ -50,6 +50,15 @@ export const api = {
   previewUrl: (id) => `${API_BASE}/capsules/${id}/preview`,
   openRpp: (id) => jsonFetch(`/capsules/${id}/open-rpp`, { method: 'POST' }),
   openFolder: (id) => jsonFetch(`/capsules/${id}/open-folder`, { method: 'POST' }),
+  listCapsuleFolders: () => jsonFetch('/capsule-folders'),
+  createCapsuleFolder: (name, parentId = null) =>
+    jsonFetch('/capsule-folders', { method: 'POST', body: JSON.stringify({ name, parent_id: parentId }) }),
+  updateCapsuleFolder: (folderId, payload) =>
+    jsonFetch(`/capsule-folders/${encodeURIComponent(folderId)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  addCapsuleToFolder: (folderId, capsuleId) =>
+    jsonFetch(`/capsule-folders/${encodeURIComponent(folderId)}/capsules`, { method: 'POST', body: JSON.stringify({ capsule_id: capsuleId }) }),
+  removeCapsuleFromFolder: (folderId, capsuleId) =>
+    jsonFetch(`/capsule-folders/${encodeURIComponent(folderId)}/capsules/${encodeURIComponent(capsuleId)}`, { method: 'DELETE' }),
 
   listContacts: () => jsonFetch('/contacts'),
   addContact: (payload) =>

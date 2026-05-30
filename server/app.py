@@ -18,6 +18,7 @@ import platform
 import queue
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -46,6 +47,8 @@ else:
 DATA_DIR = APP_DIR / "data"
 CAPSULES_DIR = DATA_DIR / "capsules"
 CONTACTS_FILE = DATA_DIR / "contacts.json"
+CAPSULE_FOLDERS_FILE = DATA_DIR / "capsule_folders.json"
+IDENTITY_FILE = DATA_DIR / "peer_identity.json"
 CONFIG_FILE = APP_DIR / "config.json"
 
 CAPSULES_DIR.mkdir(parents=True, exist_ok=True)
@@ -91,15 +94,23 @@ def save_config(cfg: dict):
     CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _truthy(value) -> bool:
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 _config = load_config()
 PORT = int(os.getenv("LAN_CAPSULE_PORT", _config.get("port", 5005)))
 HOST = os.getenv("LAN_CAPSULE_HOST", _config.get("host", "0.0.0.0"))
 SHARED_TOKEN = os.getenv("LAN_CAPSULE_SHARED_TOKEN", _config.get("shared_token", "")).strip()
+ALLOW_PUBLIC_PEERS = _truthy(os.getenv("LAN_CAPSULE_ALLOW_PUBLIC_PEERS", _config.get("allow_public_peers", False)))
+ALLOW_AUTO_RECEIVE = _truthy(os.getenv("LAN_CAPSULE_ALLOW_AUTO_RECEIVE", _config.get("allow_auto_receive", False)))
 _REAPER_CAPTURE_LOCK = threading.Lock()
 
 # receive_mode: "off" = 关闭接收, "confirm" = 验证接收, "auto" = 自动接收
 _receive_mode_lock = threading.Lock()
-_receive_mode = _config.get("receive_mode", "auto")
+_receive_mode = _config.get("receive_mode", "confirm")
+if _receive_mode == "auto" and not ALLOW_AUTO_RECEIVE:
+    _receive_mode = "confirm"
 _pending_requests: dict[str, dict] = {}
 _pending_lock = threading.Lock()
 _PENDING_TIMEOUT = 60
@@ -107,6 +118,47 @@ _sse_subscribers: list = []
 _sse_lock = threading.Lock()
 _plugin_inventory_cache: dict = {"expires_at": 0.0, "data": None}
 _plugin_inventory_lock = threading.Lock()
+
+def _configured_cors_origins() -> list[str]:
+    env_origins = os.getenv("LAN_CAPSULE_ALLOWED_ORIGINS", "").strip()
+    if env_origins:
+        return [origin.strip() for origin in env_origins.split(",") if origin.strip()]
+    cfg_origins = _config.get("allowed_origins")
+    if isinstance(cfg_origins, list):
+        return [str(origin).strip() for origin in cfg_origins if str(origin).strip()]
+    return [
+        "http://127.0.0.1:3100",
+        "http://localhost:3100",
+        f"http://127.0.0.1:{PORT}",
+        f"http://localhost:{PORT}",
+    ]
+
+
+def _is_lan_ip(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        ip = ipaddress.ip_address(str(value).split("%", 1)[0])
+    except ValueError:
+        return False
+    if ip.is_unspecified or ip.is_multicast:
+        return False
+    return ip.is_loopback or ip.is_private or ip.is_link_local
+
+
+def _is_lan_host(host: str | None) -> bool:
+    if ALLOW_PUBLIC_PEERS:
+        return True
+    if _is_lan_ip(host):
+        return True
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return False
+    return any(_is_lan_ip(info[4][0]) for info in infos)
+
 
 app = Flask(__name__, static_folder=None)
 
@@ -136,7 +188,7 @@ if _WEBAPP_DIR.exists():
 
 CORS(
     app,
-    resources={r"/api/*": {"origins": "*"}},
+    resources={r"/api/*": {"origins": _configured_cors_origins()}},
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=[
         "Content-Type",
@@ -177,6 +229,16 @@ def _check_shared_token() -> tuple[bool, str | None]:
     return True, None
 
 
+@app.before_request
+def _block_public_api_access():
+    if not request.path.startswith("/api/") or ALLOW_PUBLIC_PEERS:
+        return None
+    if not request.remote_addr or _is_lan_ip(request.remote_addr):
+        return None
+    logger.warning("已阻止非局域网 API 访问: %s %s from %s", request.method, request.path, request.remote_addr)
+    return _err("已阻止非局域网 API 访问", 403)
+
+
 def _get_receive_mode() -> str:
     with _receive_mode_lock:
         return _receive_mode
@@ -184,6 +246,8 @@ def _get_receive_mode() -> str:
 
 def _set_receive_mode(mode: str):
     global _receive_mode
+    if mode == "auto" and not ALLOW_AUTO_RECEIVE:
+        raise ValueError("自动接收已被默认禁用，请设置 LAN_CAPSULE_ALLOW_AUTO_RECEIVE=1 后再开启")
     with _receive_mode_lock:
         _receive_mode = mode
     cfg = load_config()
@@ -231,18 +295,33 @@ def _public_key_fingerprint(public_key: str) -> str:
 
 
 def _get_local_identity() -> dict:
+    identity = {}
+    if IDENTITY_FILE.exists():
+        try:
+            identity = json.loads(IDENTITY_FILE.read_text("utf-8"))
+        except Exception:
+            identity = {}
+
     cfg = load_config()
-    identity = cfg.get("peer_identity") or {}
+    if not identity:
+        identity = cfg.get("peer_identity") or {}
     private_key_b64 = identity.get("private_key") or ""
     public_key_b64 = identity.get("public_key") or ""
     if private_key_b64 and public_key_b64:
         peer_id = identity.get("peer_id") or hashlib.sha256(public_key_b64.encode("utf-8")).hexdigest()[:32]
-        return {
+        clean_identity = {
             "peer_id": peer_id,
             "public_key": public_key_b64,
             "private_key": private_key_b64,
             "fingerprint": _public_key_fingerprint(public_key_b64),
+            "created_at": identity.get("created_at") or _now_iso(),
         }
+        if not IDENTITY_FILE.exists():
+            IDENTITY_FILE.write_text(json.dumps(clean_identity, ensure_ascii=False, indent=2), encoding="utf-8")
+        if cfg.get("peer_identity"):
+            cfg.pop("peer_identity", None)
+            save_config(cfg)
+        return clean_identity
 
     private_key = Ed25519PrivateKey.generate()
     public_key = private_key.public_key()
@@ -258,8 +337,7 @@ def _get_local_identity() -> dict:
         "fingerprint": _public_key_fingerprint(public_key_b64),
         "created_at": _now_iso(),
     }
-    cfg["peer_identity"] = identity
-    save_config(cfg)
+    IDENTITY_FILE.write_text(json.dumps(identity, ensure_ascii=False, indent=2), encoding="utf-8")
     return identity
 
 
@@ -687,6 +765,89 @@ def get_capsule_dir_by_id(cap_id: str) -> Path | None:
     return None
 
 
+def _load_capsule_folders() -> dict:
+    if CAPSULE_FOLDERS_FILE.exists():
+        try:
+            raw = json.loads(CAPSULE_FOLDERS_FILE.read_text("utf-8"))
+        except Exception:
+            raw = {}
+    else:
+        raw = {}
+
+    folders = []
+    seen = set()
+    for item in raw.get("folders") or []:
+        folder_id = str(item.get("id") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if not folder_id or not name or folder_id in seen:
+            continue
+        seen.add(folder_id)
+        folders.append({
+            "id": folder_id,
+            "name": name[:80],
+            "parent_id": str(item.get("parent_id") or "").strip() or None,
+            "created_at": item.get("created_at") or _now_iso(),
+            "updated_at": item.get("updated_at") or item.get("created_at") or _now_iso(),
+        })
+    valid_ids = {folder["id"] for folder in folders}
+    for folder in folders:
+        if folder.get("parent_id") not in valid_ids:
+            folder["parent_id"] = None
+
+    memberships = {}
+    raw_memberships = raw.get("memberships") or {}
+    for folder_id, capsule_ids in raw_memberships.items():
+        if folder_id not in seen:
+            continue
+        clean_ids = []
+        clean_seen = set()
+        for capsule_id in capsule_ids or []:
+            capsule_id = str(capsule_id).strip()
+            if capsule_id and capsule_id not in clean_seen:
+                clean_seen.add(capsule_id)
+                clean_ids.append(capsule_id)
+        memberships[folder_id] = clean_ids
+
+    return {"folders": folders, "memberships": memberships}
+
+
+def _save_capsule_folders(data: dict):
+    CAPSULE_FOLDERS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _folder_response(folder: dict, memberships: dict) -> dict:
+    capsule_ids = memberships.get(folder["id"], [])
+    return {**folder, "capsule_ids": capsule_ids, "count": len(capsule_ids)}
+
+
+def _is_descendant_folder(data: dict, folder_id: str, maybe_descendant_id: str | None) -> bool:
+    if not maybe_descendant_id:
+        return False
+    parent_by_id = {folder["id"]: folder.get("parent_id") for folder in data["folders"]}
+    current = maybe_descendant_id
+    visited = set()
+    while current:
+        if current == folder_id:
+            return True
+        if current in visited:
+            return False
+        visited.add(current)
+        current = parent_by_id.get(current)
+    return False
+
+
+def _cleanup_capsule_folder_memberships(cap_id: str):
+    data = _load_capsule_folders()
+    changed = False
+    for folder_id, capsule_ids in list(data["memberships"].items()):
+        next_ids = [cid for cid in capsule_ids if cid != cap_id]
+        if next_ids != capsule_ids:
+            data["memberships"][folder_id] = next_ids
+            changed = True
+    if changed:
+        _save_capsule_folders(data)
+
+
 # ---------------------- 联系人文件管理 ----------------------
 
 def _load_contacts() -> list[dict]:
@@ -844,6 +1005,9 @@ def _resolve_target_peer(data: dict) -> tuple[dict | None, tuple[str, int, str] 
     expected_peer_id = (contact or {}).get("peer_id") or data.get("target_peer_id")
     expected_public_key = (contact or {}).get("public_key") or data.get("target_public_key")
 
+    if target_ip and not _is_lan_host(target_ip):
+        return contact, None, "目标地址不是本机或局域网地址，已阻止发送。"
+
     identity = _probe_peer_identity(target_ip, target_port) if target_ip else None
     if expected_peer_id:
         if not identity or identity.get("peer_id") != expected_peer_id or (expected_public_key and identity.get("public_key") != expected_public_key):
@@ -853,6 +1017,8 @@ def _resolve_target_peer(data: dict) -> tuple[dict | None, tuple[str, int, str] 
             return contact, None, "无法找到该可信联系人当前地址。请确认对方在线，或临时填写当前 IP。"
         target_ip = identity["ip"]
         target_port = int(identity.get("port") or target_port)
+        if not _is_lan_host(target_ip):
+            return contact, None, "发现到的目标地址不是本机或局域网地址，已阻止发送。"
         if contact:
             _update_contact_from_identity(contact, identity, source="discover")
             _save_contacts(contacts)
@@ -936,6 +1102,106 @@ def get_capsule(cap_id: str):
     return _ok(cap)
 
 
+@app.route("/api/capsule-folders", methods=["GET"])
+def list_capsule_folders():
+    data = _load_capsule_folders()
+    items = [_folder_response(folder, data["memberships"]) for folder in data["folders"]]
+    return _ok({"items": items, "count": len(items)})
+
+
+@app.route("/api/capsule-folders", methods=["POST"])
+def create_capsule_folder():
+    data = _load_capsule_folders()
+    payload = request.get_json(silent=True) or {}
+    name = str(payload.get("name") or "").strip()
+    parent_id = str(payload.get("parent_id") or "").strip() or None
+    if not name:
+        return _err("分类名称不能为空", 400)
+    if parent_id and not any(folder["id"] == parent_id for folder in data["folders"]):
+        return _err("父分类不存在", 404)
+    if any(folder["name"] == name and folder.get("parent_id") == parent_id for folder in data["folders"]):
+        return _err("分类名称已存在", 409)
+    now = _now_iso()
+    folder = {
+        "id": uuid_lib.uuid4().hex,
+        "name": name[:80],
+        "parent_id": parent_id,
+        "created_at": now,
+        "updated_at": now,
+    }
+    data["folders"].append(folder)
+    data["memberships"][folder["id"]] = []
+    _save_capsule_folders(data)
+    return _ok(_folder_response(folder, data["memberships"]), message="分类已创建"), 201
+
+
+@app.route("/api/capsule-folders/<folder_id>", methods=["PATCH"])
+def update_capsule_folder(folder_id: str):
+    data = _load_capsule_folders()
+    folder = next((item for item in data["folders"] if item["id"] == folder_id), None)
+    if not folder:
+        return _err("分类不存在", 404)
+    payload = request.get_json(silent=True) or {}
+
+    if "name" in payload:
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return _err("分类名称不能为空", 400)
+        if any(item["id"] != folder_id and item["name"] == name and item.get("parent_id") == folder.get("parent_id") for item in data["folders"]):
+            return _err("分类名称已存在", 409)
+        folder["name"] = name[:80]
+
+    if "parent_id" in payload:
+        parent_id = str(payload.get("parent_id") or "").strip() or None
+        if parent_id == folder_id:
+            return _err("不能移动到自身下", 400)
+        if parent_id and not any(item["id"] == parent_id for item in data["folders"]):
+            return _err("目标分类不存在", 404)
+        if _is_descendant_folder(data, folder_id, parent_id):
+            return _err("不能移动到自己的子分类下", 400)
+        if any(item["id"] != folder_id and item["name"] == folder["name"] and item.get("parent_id") == parent_id for item in data["folders"]):
+            return _err("目标分类下已有同名分类", 409)
+        folder["parent_id"] = parent_id
+
+    folder["updated_at"] = _now_iso()
+    _save_capsule_folders(data)
+    return _ok(_folder_response(folder, data["memberships"]), message="分类已更新")
+
+
+@app.route("/api/capsule-folders/<folder_id>/capsules", methods=["POST"])
+def add_capsule_to_folder(folder_id: str):
+    data = _load_capsule_folders()
+    folder = next((item for item in data["folders"] if item["id"] == folder_id), None)
+    if not folder:
+        return _err("分类不存在", 404)
+    payload = request.get_json(silent=True) or {}
+    capsule_id = str(payload.get("capsule_id") or "").strip()
+    if not capsule_id:
+        return _err("capsule_id 必填", 400)
+    cap = get_capsule_by_id(capsule_id)
+    if not cap:
+        return _err("胶囊不存在", 404)
+    capsule_ids = data["memberships"].setdefault(folder_id, [])
+    if cap["id"] not in capsule_ids:
+        capsule_ids.append(cap["id"])
+        folder["updated_at"] = _now_iso()
+        _save_capsule_folders(data)
+    return _ok(_folder_response(folder, data["memberships"]), message="已加入分类")
+
+
+@app.route("/api/capsule-folders/<folder_id>/capsules/<cap_id>", methods=["DELETE"])
+def remove_capsule_from_folder(folder_id: str, cap_id: str):
+    data = _load_capsule_folders()
+    folder = next((item for item in data["folders"] if item["id"] == folder_id), None)
+    if not folder:
+        return _err("分类不存在", 404)
+    capsule_ids = data["memberships"].setdefault(folder_id, [])
+    data["memberships"][folder_id] = [cid for cid in capsule_ids if cid != cap_id]
+    folder["updated_at"] = _now_iso()
+    _save_capsule_folders(data)
+    return _ok(_folder_response(folder, data["memberships"]), message="已移出分类")
+
+
 @app.route("/api/capsules", methods=["POST"])
 def create_capsule():
     if "bundle" in request.files:
@@ -987,7 +1253,9 @@ def delete_capsule(cap_id: str):
     target = get_capsule_dir_by_id(cap_id)
     if not target:
         return _err("胶囊不存在", 404)
+    cap = _capsule_from_dir(target)
     shutil.rmtree(target, ignore_errors=True)
+    _cleanup_capsule_folder_memberships((cap or {}).get("id") or cap_id)
     return _ok({"id": cap_id})
 
 
@@ -1572,7 +1840,10 @@ def set_receive_mode():
     mode = data.get("mode", "").strip()
     if mode not in ("off", "confirm", "auto"):
         return _err("mode 必须是 off / confirm / auto", 400)
-    _set_receive_mode(mode)
+    try:
+        _set_receive_mode(mode)
+    except ValueError as e:
+        return _err(str(e), 403)
     logger.info("接收模式已切换为: %s", mode)
     return _ok({"mode": mode})
 
@@ -1790,7 +2061,7 @@ def p2p_send():
     capsule_id = data.get("capsule_id")
     contact, resolved, resolve_error = _resolve_target_peer(data)
     if resolve_error:
-        return _err(resolve_error, 404)
+        return _err(resolve_error, 403 if "已阻止发送" in resolve_error else 404)
     target_ip, target_port, target_name = resolved or ("", 5005, "")
     if not capsule_id or not target_ip:
         return _err("capsule_id 与 target_ip 必填", 400)

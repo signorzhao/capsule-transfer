@@ -19,6 +19,11 @@ import {
   Pencil,
   Check,
   X,
+  ChevronDown,
+  Clock,
+  HardDrive,
+  Inbox,
+  FolderPlus,
   Radio,
   AlertTriangle,
   Shield,
@@ -601,6 +606,267 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState(null);
+  const [selectedFolder, setSelectedFolder] = useState('all');
+  const [selectedId, setSelectedId] = useState(capsules[0]?.id || null);
+  const [query, setQuery] = useState('');
+  const [customFolders, setCustomFolders] = useState([]);
+  const [isCreatingFolder, setIsCreatingFolder] = useState(false);
+  const [createParentId, setCreateParentId] = useState(null);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [folderError, setFolderError] = useState('');
+  const [draggingId, setDraggingId] = useState(null);
+  const [draggingFolderId, setDraggingFolderId] = useState(null);
+  const [dragOverFolder, setDragOverFolder] = useState(null);
+
+  const parseCapsuleDate = (value) => {
+    if (!value) return null;
+    const raw = String(value);
+    const date = new Date(raw.endsWith('Z') ? raw : `${raw}Z`);
+    return Number.isNaN(date.getTime()) ? null : date;
+  };
+  const isReceived = (cap) => Boolean(cap.source_peer);
+  const isRecentReceived = (cap) => {
+    const date = parseCapsuleDate(cap.created_at);
+    return isReceived(cap) && date && Date.now() - date.getTime() <= 7 * 24 * 60 * 60 * 1000;
+  };
+  const hasMissingPlugins = (cap) => Boolean(cap.plugin_status?.inventory_available && cap.plugin_status?.missing > 0);
+  useEffect(() => {
+    let cancelled = false;
+    api.listCapsuleFolders()
+      .then((res) => {
+        if (!cancelled) setCustomFolders(res.data?.items || []);
+      })
+      .catch((err) => {
+        if (!cancelled) setFolderError(`读取分类失败：${err.message}`);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const refreshCustomFolders = async () => {
+    const res = await api.listCapsuleFolders();
+    setCustomFolders(res.data?.items || []);
+    return res.data?.items || [];
+  };
+
+  const createFolder = async () => {
+    const name = newFolderName.trim();
+    if (!name) return;
+    try {
+      setFolderError('');
+      const res = await api.createCapsuleFolder(name, createParentId);
+      const folder = res.data || res;
+      await refreshCustomFolders();
+      setSelectedFolder(`folder:${folder.id}`);
+      setNewFolderName('');
+      setIsCreatingFolder(false);
+      setCreateParentId(null);
+    } catch (err) {
+      setFolderError(`创建分类失败：${err.message}`);
+    }
+  };
+
+  const startCreateFolder = (parentId = null) => {
+    setCreateParentId(parentId);
+    setNewFolderName('');
+    setIsCreatingFolder(true);
+  };
+
+  const addToFolder = async (folderId, capsuleId) => {
+    if (!folderId || !capsuleId) return;
+    try {
+      setFolderError('');
+      await api.addCapsuleToFolder(folderId, capsuleId);
+      await refreshCustomFolders();
+    } catch (err) {
+      setFolderError(`加入分类失败：${err.message}`);
+    } finally {
+      setDragOverFolder(null);
+      setDraggingId(null);
+    }
+  };
+
+  const moveFolder = async (folderId, parentId) => {
+    if (!folderId || folderId === parentId) return;
+    try {
+      setFolderError('');
+      await api.updateCapsuleFolder(folderId, { parent_id: parentId || null });
+      await refreshCustomFolders();
+    } catch (err) {
+      setFolderError(`移动分类失败：${err.message}`);
+    } finally {
+      setDraggingFolderId(null);
+      setDragOverFolder(null);
+    }
+  };
+
+  const removeFromCurrentFolder = async (cap) => {
+    if (!selectedFolder.startsWith('folder:')) return;
+    const folderId = selectedFolder.slice('folder:'.length);
+    try {
+      setFolderError('');
+      await api.removeCapsuleFromFolder(folderId, cap.id);
+      await refreshCustomFolders();
+    } catch (err) {
+      setFolderError(`移出分类失败：${err.message}`);
+    }
+  };
+
+  const descendantIdsByFolderId = useMemo(() => {
+    const childrenByParent = new Map();
+    customFolders.forEach((folder) => {
+      const parentId = folder.parent_id || null;
+      if (!childrenByParent.has(parentId)) childrenByParent.set(parentId, []);
+      childrenByParent.get(parentId).push(folder.id);
+    });
+    const collect = (folderId) => {
+      const ids = new Set([folderId]);
+      (childrenByParent.get(folderId) || []).forEach((childId) => {
+        collect(childId).forEach((id) => ids.add(id));
+      });
+      return ids;
+    };
+    const result = new Map();
+    customFolders.forEach((folder) => result.set(folder.id, collect(folder.id)));
+    return result;
+  }, [customFolders]);
+
+  const folderPathsByCapsuleId = useMemo(() => {
+    const folderById = new Map(customFolders.map((folder) => [folder.id, folder]));
+    const pathFor = (folder) => {
+      const chain = [];
+      let current = folder;
+      const seen = new Set();
+      while (current && !seen.has(current.id)) {
+        chain.unshift(current.name);
+        seen.add(current.id);
+        current = current.parent_id ? folderById.get(current.parent_id) : null;
+      }
+      return chain;
+    };
+    const result = new Map();
+    customFolders.forEach((folder) => {
+      const path = pathFor(folder);
+      (folder.capsule_ids || []).forEach((capsuleId) => {
+        if (!result.has(capsuleId)) result.set(capsuleId, []);
+        result.get(capsuleId).push(path);
+      });
+    });
+    return result;
+  }, [customFolders]);
+
+  const folderLabelsForCapsule = (cap) => {
+    const paths = folderPathsByCapsuleId.get(cap.id) || [];
+    const labels = [];
+    paths.forEach((path) => {
+      path.forEach((part) => {
+        if (!labels.includes(part)) labels.push(part);
+      });
+    });
+    return labels;
+  };
+  const folderSearchTextForCapsule = (cap) => {
+    const paths = folderPathsByCapsuleId.get(cap.id) || [];
+    const labels = folderLabelsForCapsule(cap);
+    const pathText = paths.map((path) => path.join(' ')).join(' ');
+    const breadcrumbText = paths.map((path) => path.join('>')).join(' ');
+    return [...labels, pathText, breadcrumbText].filter(Boolean).join(' ');
+  };
+
+  const buildCustomFolderTree = (folders) => {
+    const nodeById = new Map();
+    const folderById = new Map(folders.map((folder) => [folder.id, folder]));
+    folders.forEach((folder) => {
+      const descendantIds = descendantIdsByFolderId.get(folder.id) || new Set([folder.id]);
+      const capsuleIds = new Set();
+      descendantIds.forEach((id) => {
+        (folderById.get(id)?.capsule_ids || []).forEach((capsuleId) => capsuleIds.add(capsuleId));
+      });
+      nodeById.set(folder.id, {
+        key: `folder:${folder.id}`,
+        id: folder.id,
+        label: folder.name,
+        icon: FolderOpen,
+        count: capsuleIds.size,
+        droppable: true,
+        draggableFolder: true,
+        predicate: (cap) => capsuleIds.has(cap.id),
+        children: [],
+      });
+    });
+    const roots = [];
+    folders.forEach((folder) => {
+      const node = nodeById.get(folder.id);
+      const parent = folder.parent_id ? nodeById.get(folder.parent_id) : null;
+      if (parent) parent.children.push(node);
+      else roots.push(node);
+    });
+    const sortNodes = (nodes) => nodes
+      .sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'))
+      .map((node) => ({ ...node, children: sortNodes(node.children || []) }));
+    return sortNodes(roots);
+  };
+
+  const folderTree = useMemo(() => {
+    const customItems = buildCustomFolderTree(customFolders);
+    return [
+      {
+        key: 'custom-root',
+        label: '分类',
+        icon: FolderOpen,
+        count: customFolders.length,
+        selectable: false,
+        acceptsFolderDrop: true,
+        children: customItems,
+      },
+      { key: 'all', label: '全部胶囊', icon: Package, count: capsules.length, predicate: () => true },
+      { key: 'local', label: '本机捕获', icon: HardDrive, count: capsules.filter((cap) => !isReceived(cap)).length, predicate: (cap) => !isReceived(cap) },
+      { key: 'received', label: '接收胶囊', icon: Inbox, count: capsules.filter(isReceived).length, predicate: isReceived },
+      { key: 'recent-received', label: '最近 7 天接收', icon: Clock, count: capsules.filter(isRecentReceived).length, predicate: isRecentReceived },
+      { key: 'missing-plugins', label: '插件缺失', icon: AlertTriangle, count: capsules.filter(hasMissingPlugins).length, predicate: hasMissingPlugins },
+    ];
+  }, [capsules, customFolders, descendantIdsByFolderId]);
+
+  const allFolders = useMemo(() => {
+    const flatten = (items) => items.flatMap((item) => [item, ...flatten(item.children || [])]);
+    return flatten(folderTree);
+  }, [folderTree]);
+  const activeFolder = allFolders.find((folder) => folder.key === selectedFolder) || allFolders.find((folder) => folder.key === 'all') || { predicate: () => true };
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredCapsules = capsules.filter((cap) => {
+    if (!activeFolder.predicate?.(cap)) return false;
+    if (!normalizedQuery) return true;
+    const haystack = [
+      cap.name,
+      cap.project_name,
+      cap.keywords,
+      cap.description,
+      cap.capsule_type,
+      cap.source_peer,
+      cap.rpp_file,
+      folderSearchTextForCapsule(cap),
+    ].filter(Boolean).join(' ').toLowerCase();
+    return haystack.includes(normalizedQuery);
+  });
+  const selectedCapsule = filteredCapsules.find((cap) => cap.id === selectedId) || filteredCapsules[0] || null;
+  const activeCustomFolder = selectedFolder.startsWith('folder:')
+    ? customFolders.find((folder) => `folder:${folder.id}` === selectedFolder)
+    : null;
+  const selectedIsDirectlyInActiveFolder = Boolean(
+    selectedCapsule && activeCustomFolder?.capsule_ids?.includes(selectedCapsule.id),
+  );
+  const createParentName = createParentId
+    ? customFolders.find((folder) => folder.id === createParentId)?.name
+    : null;
+
+  useEffect(() => {
+    if (!filteredCapsules.length) {
+      if (selectedId !== null) setSelectedId(null);
+      return;
+    }
+    if (!filteredCapsules.some((cap) => cap.id === selectedId)) {
+      setSelectedId(filteredCapsules[0].id);
+    }
+  }, [filteredCapsules, selectedId]);
 
   const handlePlay = (cap) => {
     if (playingId === cap.id) { audioRef.current?.pause(); setPlayingId(null); return; }
@@ -618,14 +884,116 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
   const requestDelete = (cap) => { setDeleteConfirmId(cap.id); };
   const cancelDelete = () => { setDeleteConfirmId(null); };
   const confirmDelete = (cap) => { setDeleteConfirmId(null); onDelete(cap); };
+  const stopAction = (event, fn) => {
+    event.stopPropagation();
+    fn();
+  };
 
   useEffect(() => () => audioRef.current?.pause(), []);
 
+  const renderFolder = (folder, depth = 0) => {
+    const Icon = folder.icon;
+    const active = selectedFolder === folder.key;
+    const hasChildren = Boolean(folder.children?.length);
+    const canSelect = folder.selectable !== false;
+    const canDropCapsule = Boolean(folder.droppable);
+    const canDropFolder = Boolean(folder.droppable || folder.acceptsFolderDrop);
+    const isDragOver = dragOverFolder === folder.key;
+    const folderDropTargetId = folder.acceptsFolderDrop ? null : folder.id;
+    return (
+      <div key={folder.key}>
+        <button
+          onClick={() => { if (canSelect) setSelectedFolder(folder.key); }}
+          draggable={Boolean(folder.draggableFolder)}
+          onDragStart={(event) => {
+            if (!folder.draggableFolder) return;
+            event.stopPropagation();
+            setDraggingFolderId(folder.id);
+            event.dataTransfer.effectAllowed = 'move';
+            event.dataTransfer.setData('application/x-capsule-folder-id', folder.id);
+          }}
+          onDragOver={(event) => {
+            const hasCapsule = Array.from(event.dataTransfer.types).includes('text/plain');
+            const hasFolder = Array.from(event.dataTransfer.types).includes('application/x-capsule-folder-id');
+            if ((!hasCapsule || !canDropCapsule) && (!hasFolder || !canDropFolder)) return;
+            event.preventDefault();
+            event.dataTransfer.dropEffect = hasFolder ? 'move' : 'copy';
+            setDragOverFolder(folder.key);
+          }}
+          onDragLeave={() => {
+            if (isDragOver) setDragOverFolder(null);
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            const droppedFolderId = event.dataTransfer.getData('application/x-capsule-folder-id') || draggingFolderId;
+            if (droppedFolderId && canDropFolder) {
+              moveFolder(droppedFolderId, folderDropTargetId);
+              return;
+            }
+            const capsuleId = event.dataTransfer.getData('text/plain') || draggingId;
+            if (capsuleId && canDropCapsule) addToFolder(folder.id, capsuleId);
+          }}
+          onDragEnd={() => {
+            if (folder.draggableFolder) {
+              setDraggingFolderId(null);
+              setDragOverFolder(null);
+            }
+          }}
+          className={`group/folder w-full h-9 px-2 rounded-lg flex items-center gap-2 text-left transition-colors ${active ? 'bg-indigo-500/15 border border-indigo-500/35 text-indigo-100' : isDragOver ? 'border border-indigo-500/50 bg-indigo-500/10 text-indigo-100' : canSelect ? 'border border-transparent text-slate-400 hover:bg-slate-800/70 hover:text-slate-200' : 'border border-transparent text-slate-500'}`}
+          style={{ paddingLeft: `${8 + depth * 18}px` }}
+        >
+          {hasChildren ? <ChevronDown size={14} className="text-slate-500 shrink-0" /> : <span className="w-3.5 shrink-0" />}
+          <Icon size={15} className={active ? 'text-indigo-300 shrink-0' : 'text-slate-500 shrink-0'} />
+          <span className="min-w-0 flex-1 truncate text-sm">{folder.label}</span>
+          {(folder.key === 'custom-root' || folder.droppable) && (
+            <span
+              role="button"
+              tabIndex={0}
+              title={folder.key === 'custom-root' ? '新建根分类' : '新建子分类'}
+              onClick={(event) => {
+                event.stopPropagation();
+                startCreateFolder(folder.droppable ? folder.id : null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  startCreateFolder(folder.droppable ? folder.id : null);
+                }
+              }}
+              className="opacity-0 group-hover/folder:opacity-100 rounded p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-200"
+            >
+              <FolderPlus size={13} />
+            </span>
+          )}
+          <span className="text-[11px] text-slate-500">{folder.count}</span>
+        </button>
+        {hasChildren && (
+          <div className="mt-1 space-y-1">
+            {folder.children.map((child) => renderFolder(child, depth + 1))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
-    <div className="max-w-4xl mx-auto">
-      <div className="flex items-center justify-between mb-8">
-        <div><h1 className="text-2xl font-bold text-white">我的胶囊</h1><p className="text-slate-500 text-sm mt-1">本地已捕获 / 接收的胶囊（共 {capsules.length} 个）</p></div>
-        <div className="flex items-center space-x-2">
+    <div className="h-full min-h-[720px] flex flex-col">
+      <div className="flex flex-col gap-4 mb-5 xl:flex-row xl:items-start xl:justify-between">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-bold text-white">胶囊库</h1>
+          <p className="text-slate-500 text-sm mt-1">资源管理器视图 · 共 {capsules.length} 个胶囊 · 当前显示 {filteredCapsules.length} 个</p>
+        </div>
+        <div className="flex w-full items-center gap-2 xl:w-auto">
+          <div className="relative min-w-0 flex-1 xl:w-[340px] xl:flex-none">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600" />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="搜索名称、工程、来源、标签..."
+              className="w-full bg-[#0f1115] border border-slate-800 rounded-lg pl-9 pr-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
+            />
+          </div>
           <button disabled={isCheckingSetup} onClick={async () => {
             if (showCreateForm) {
               setShowCreateForm(false);
@@ -633,7 +1001,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
             }
             const allowed = await onRequestCreate();
             if (allowed) setShowCreateForm(true);
-          }} className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg flex items-center space-x-2 shadow-lg shadow-indigo-600/20 disabled:opacity-50 disabled:cursor-not-allowed">
+          }} className="shrink-0 whitespace-nowrap bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg flex items-center space-x-2 shadow-lg shadow-indigo-600/20 disabled:opacity-50 disabled:cursor-not-allowed">
             {isCheckingSetup ? <RefreshCw size={18} className="animate-spin" /> : <Plus size={18} />}
             <span>{isCheckingSetup ? '检测中...' : '新捕获'}</span>
           </button>
@@ -641,36 +1009,195 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
       </div>
 
       {showCreateForm && <CreateCapsuleForm onCancel={() => setShowCreateForm(false)} onSubmit={async (data) => { const result = await onCreate(data); if (result !== false) setShowCreateForm(false); }} />}
-      {capsules.length === 0 && !showCreateForm ? (
-        <div className="border-2 border-dashed border-slate-800 rounded-2xl flex flex-col items-center justify-center p-16 text-slate-500"><Package size={32} className="mb-3" /><p className="text-sm">暂无胶囊。可点右上角“新捕获”从 REAPER 捕获。</p></div>
-      ) : (
-        <div className="grid gap-3">
-          {capsules.map((cap) => (
-            <div key={cap.id} className="group bg-[#1a1d24] hover:bg-[#21252e] border border-slate-800 p-4 rounded-xl flex items-center transition-all">
-              <button onClick={() => handlePlay(cap)} className={`w-10 h-10 rounded flex items-center justify-center mr-4 ${playingId === cap.id ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-indigo-400 hover:bg-indigo-600/20'}`}>{playingId === cap.id ? <Pause size={18} /> : <Play size={18} />}</button>
-              <div className="flex-1 min-w-0">
-                {editingId === cap.id ? (
-                  <div className="flex items-center space-x-2"><input autoFocus value={editName} onChange={(e) => setEditName(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') confirmRename(cap); if (e.key === 'Escape') setEditingId(null); }} className="flex-1 bg-[#0f1115] border border-indigo-500 rounded px-2 py-1 text-sm text-slate-200" /><button onClick={() => confirmRename(cap)} className="p-1 text-emerald-400"><Check size={16} /></button><button onClick={() => setEditingId(null)} className="p-1 text-slate-500"><X size={16} /></button></div>
-                ) : <h3 className="font-medium text-slate-200 truncate cursor-pointer hover:text-indigo-300" onDoubleClick={() => startRename(cap)}>{cap.name}</h3>}
-                <div className="text-xs text-slate-500 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1"><span>{formatDate(cap.created_at)}</span><span>{formatBytes(cap.size_bytes)}</span><PluginStatusBadge status={cap.plugin_status} />{cap.source_peer && <span className="text-emerald-500/80">来自 {cap.source_peer}</span>}</div>
-                <MissingPluginPreview status={cap.plugin_status} />
+
+      <div className="grid flex-1 min-h-0 grid-cols-1 gap-4 lg:grid-cols-[240px_minmax(420px,1fr)] xl:grid-cols-[260px_minmax(480px,1fr)_292px]">
+          <aside className="min-h-[220px] lg:min-h-0 rounded-xl border border-slate-800 bg-[#161920] p-4 flex flex-col">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <div className="text-sm font-semibold text-slate-200">目录</div>
+                <div className="text-[11px] text-slate-600 mt-0.5">分类与快速视图</div>
               </div>
-              <button onClick={() => startRename(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-indigo-400"><Pencil size={15} /></button>
-              <button title="打开 RPP 工程" onClick={() => onOpenRpp(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-orange-400"><Music size={16} /></button>
-              <button title="打开胶囊文件夹" onClick={() => onOpenFolder(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 text-slate-500 hover:text-amber-400"><FolderOpen size={16} /></button>
-              <button onClick={() => onSend(cap)} className="opacity-0 group-hover:opacity-100 mr-1 p-2 bg-indigo-600/10 text-indigo-400 rounded-lg hover:bg-indigo-600 hover:text-white"><Send size={16} /></button>
-              {deleteConfirmId === cap.id ? (
-                <div className="flex items-center space-x-1">
-                  <button title="确认删除" onClick={() => confirmDelete(cap)} className="p-2 bg-red-500/15 text-red-300 rounded-lg hover:bg-red-500 hover:text-white"><Check size={16} /></button>
-                  <button title="取消删除" onClick={cancelDelete} className="p-2 text-slate-500 hover:text-slate-200"><X size={16} /></button>
-                </div>
-              ) : (
-                <button title="删除胶囊" onClick={() => requestDelete(cap)} className="opacity-0 group-hover:opacity-100 p-2 text-slate-500 hover:text-red-400"><Trash2 size={16} /></button>
-              )}
+              <button onClick={() => startCreateFolder(null)} className="p-2 rounded-lg border border-slate-800 text-slate-500 hover:text-slate-300 hover:bg-slate-800" title="新建分类">
+                <FolderPlus size={16} />
+              </button>
             </div>
-          ))}
+            {isCreatingFolder && (
+              <div className="mb-3 rounded-lg border border-slate-800 bg-[#0f1115] p-2">
+                <input
+                  autoFocus
+                  value={newFolderName}
+                  onChange={(event) => setNewFolderName(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') createFolder();
+                    if (event.key === 'Escape') { setIsCreatingFolder(false); setNewFolderName(''); setCreateParentId(null); }
+                  }}
+                  placeholder="分类名称"
+                  className="w-full bg-transparent px-1 py-1 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none"
+                />
+                <div className="px-1 text-[11px] text-slate-600">{createParentName ? `创建到：${createParentName}` : '创建到：分类根目录'}</div>
+                <div className="mt-2 flex justify-end gap-2">
+                  <button onClick={() => { setIsCreatingFolder(false); setNewFolderName(''); setCreateParentId(null); }} className="px-2 py-1 text-xs text-slate-500 hover:text-slate-200">取消</button>
+                  <button onClick={createFolder} className="rounded bg-indigo-600 px-2.5 py-1 text-xs text-white hover:bg-indigo-500">创建</button>
+                </div>
+              </div>
+            )}
+            <div className="space-y-1 overflow-y-auto custom-scrollbar pr-1">
+              {folderTree.map((folder) => renderFolder(folder))}
+            </div>
+            {folderError && <div className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] leading-relaxed text-red-200">{folderError}</div>}
+            <div className="mt-auto pt-4 text-[11px] leading-relaxed text-slate-600">
+              拖拽胶囊到“分类”下的文件夹中，只会保存分类关系，不会移动本地胶囊文件。
+            </div>
+          </aside>
+
+          <section className="min-h-0 rounded-xl border border-slate-800 bg-[#11151b] overflow-hidden flex flex-col">
+            <div className="h-11 px-4 grid grid-cols-[minmax(190px,1fr)_84px_92px_70px_minmax(240px,1.3fr)] items-center gap-3 border-b border-slate-800 bg-[#151a21] text-[11px] font-bold uppercase tracking-wider text-slate-500">
+              <span>名称</span>
+              <span>来源</span>
+              <span>插件</span>
+              <span>大小</span>
+              <span>分类</span>
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
+              {filteredCapsules.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-slate-500">
+                  <Package size={28} className="mb-3" />
+                  <p className="text-sm">当前目录没有匹配的胶囊。</p>
+                </div>
+              ) : filteredCapsules.map((cap) => {
+                const selected = selectedCapsule?.id === cap.id;
+                const folderLabels = folderLabelsForCapsule(cap);
+                const hiddenFolderLabels = folderLabels.slice(5);
+                const folderTitle = (folderPathsByCapsuleId.get(cap.id) || []).map((path) => path.join(' > ')).join('\n');
+                return (
+                  <div
+                    key={cap.id}
+                    draggable
+                    onClick={() => setSelectedId(cap.id)}
+                    onDragStart={(event) => {
+                      setDraggingId(cap.id);
+                      event.dataTransfer.effectAllowed = 'copy';
+                      event.dataTransfer.setData('text/plain', cap.id);
+                    }}
+                    onDragEnd={() => {
+                      setDraggingId(null);
+                      setDragOverFolder(null);
+                    }}
+                    className={`group min-h-[48px] px-4 grid grid-cols-[minmax(190px,1fr)_84px_92px_70px_minmax(240px,1.3fr)] items-center gap-3 border-b border-slate-800/70 cursor-grab transition-colors active:cursor-grabbing ${draggingId === cap.id ? 'opacity-60' : ''} ${selected ? 'bg-indigo-500/10 ring-1 ring-inset ring-indigo-500/30' : 'bg-[#11151b] hover:bg-[#171d25]'}`}
+                  >
+                    <div className="min-w-0 flex items-center gap-3">
+                      <button title={playingId === cap.id ? '暂停预览' : '播放预览'} onClick={(event) => stopAction(event, () => handlePlay(cap))} className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${playingId === cap.id ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-indigo-300 hover:bg-indigo-600/20'}`}>
+                        {playingId === cap.id ? <Pause size={15} /> : <Play size={15} />}
+                      </button>
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium text-slate-200">{cap.name}</div>
+                      </div>
+                    </div>
+                    <div className="min-w-0 text-xs">
+                      <div className="truncate text-slate-300">{cap.source_peer || '本机'}</div>
+                    </div>
+                    <div><PluginStatusBadge status={cap.plugin_status} /></div>
+                    <div className="text-xs text-slate-400">{formatBytes(cap.size_bytes)}</div>
+                    <div className="min-w-0 flex flex-wrap items-center gap-1.5">
+                      {folderLabels.length === 0 ? (
+                        <span className="text-[11px] text-slate-600">未分类</span>
+                      ) : folderLabels.slice(0, 5).map((label) => (
+                        <span key={label} title={label} className="max-w-[92px] truncate rounded border border-slate-700/70 bg-slate-800/50 px-1.5 py-0.5 text-[11px] text-slate-300">
+                          {label}
+                        </span>
+                      ))}
+                      {hiddenFolderLabels.length > 0 && <span title={folderTitle || hiddenFolderLabels.join('、')} className="text-[11px] text-slate-500">+{hiddenFolderLabels.length}</span>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          <aside className="hidden xl:block min-h-0 rounded-xl border border-slate-800 bg-[#161920] p-4 overflow-y-auto custom-scrollbar">
+            {!selectedCapsule ? (
+              <div className="h-full flex flex-col items-center justify-center text-center text-slate-500">
+                <Package size={30} className="mb-3" />
+                <p className="text-sm">选择一个胶囊查看详情。</p>
+              </div>
+            ) : (
+              <div className="space-y-5">
+                <div>
+                  <div className="w-12 h-12 rounded-xl bg-indigo-500/15 border border-indigo-500/25 flex items-center justify-center text-indigo-300 mb-4">
+                    <FileAudio size={22} />
+                  </div>
+                  {editingId === selectedCapsule.id ? (
+                    <div className="flex items-center gap-2">
+                      <input autoFocus value={editName} onChange={(e) => setEditName(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') confirmRename(selectedCapsule); if (e.key === 'Escape') setEditingId(null); }} className="min-w-0 flex-1 bg-[#0f1115] border border-indigo-500 rounded px-2 py-1 text-sm text-slate-200" />
+                      <button onClick={() => confirmRename(selectedCapsule)} className="p-1 text-emerald-400"><Check size={15} /></button>
+                    </div>
+                  ) : (
+                    <h2 className="text-base font-bold leading-snug text-white break-words">{selectedCapsule.name}</h2>
+                  )}
+                  <div className="mt-2 text-xs text-slate-500">{selectedCapsule.source_peer ? `来自 ${selectedCapsule.source_peer}` : '本机捕获'}</div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button onClick={() => handlePlay(selectedCapsule)} className={`h-9 rounded-lg flex items-center justify-center gap-2 text-sm ${playingId === selectedCapsule.id ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-indigo-300 hover:bg-indigo-600/20'}`}>
+                    {playingId === selectedCapsule.id ? <Pause size={15} /> : <Play size={15} />}
+                    <span>{playingId === selectedCapsule.id ? '暂停' : '预览'}</span>
+                  </button>
+                  <button onClick={() => onSend(selectedCapsule)} className="h-9 rounded-lg bg-indigo-600 text-white flex items-center justify-center gap-2 text-sm hover:bg-indigo-500"><Send size={15} /><span>发送</span></button>
+                  <button onClick={() => onOpenRpp(selectedCapsule)} className="h-9 rounded-lg bg-slate-800 text-slate-300 flex items-center justify-center gap-2 text-sm hover:text-orange-300"><Music size={15} /><span>RPP</span></button>
+                  <button onClick={() => onOpenFolder(selectedCapsule)} className="h-9 rounded-lg bg-slate-800 text-slate-300 flex items-center justify-center gap-2 text-sm hover:text-amber-300"><FolderOpen size={15} /><span>目录</span></button>
+                </div>
+
+                <div className="space-y-3 text-sm">
+                  <DetailRow label="创建时间" value={formatDate(selectedCapsule.created_at)} />
+                  <DetailRow label="大小" value={formatBytes(selectedCapsule.size_bytes)} />
+                  <DetailRow label="工程" value={selectedCapsule.project_name || selectedCapsule.rpp_file || '未记录'} />
+                  <DetailRow label="类型" value={selectedCapsule.capsule_type || 'reaper'} />
+                </div>
+
+                <div>
+                  <div className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500">插件状态</div>
+                  <PluginStatusBadge status={selectedCapsule.plugin_status} />
+                  <MissingPluginPreview status={selectedCapsule.plugin_status} />
+                </div>
+
+                {selectedCapsule.description && (
+                  <div>
+                    <div className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500">描述</div>
+                    <p className="text-xs leading-relaxed text-slate-400">{selectedCapsule.description}</p>
+                  </div>
+                )}
+
+                <div className="border-t border-slate-800 pt-4">
+                  {activeCustomFolder && selectedIsDirectlyInActiveFolder && (
+                    <button onClick={() => removeFromCurrentFolder(selectedCapsule)} className="mb-2 h-9 w-full rounded-lg bg-slate-800 text-sm text-slate-300 hover:text-amber-300">
+                      从“{activeCustomFolder.name}”移出
+                    </button>
+                  )}
+                  {deleteConfirmId === selectedCapsule.id ? (
+                    <div className="grid grid-cols-2 gap-2">
+                      <button title="确认删除" onClick={() => confirmDelete(selectedCapsule)} className="h-9 rounded-lg bg-red-500/15 text-red-300 hover:bg-red-500 hover:text-white text-sm">确认删除</button>
+                      <button title="取消删除" onClick={cancelDelete} className="h-9 rounded-lg bg-slate-800 text-slate-400 hover:text-slate-200 text-sm">取消</button>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-2">
+                      <button onClick={() => startRename(selectedCapsule)} className="h-9 rounded-lg bg-slate-800 text-slate-300 hover:text-indigo-300 text-sm flex items-center justify-center gap-2"><Pencil size={15} />重命名</button>
+                      <button onClick={() => requestDelete(selectedCapsule)} className="h-9 rounded-lg bg-red-500/10 text-red-300 hover:bg-red-500 hover:text-white text-sm flex items-center justify-center gap-2"><Trash2 size={15} />删除</button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </aside>
         </div>
-      )}
+    </div>
+  );
+}
+
+function DetailRow({ label, value }) {
+  return (
+    <div className="flex items-start justify-between gap-3 border-b border-slate-800/70 pb-2">
+      <span className="shrink-0 text-xs text-slate-500">{label}</span>
+      <span className="min-w-0 text-right text-xs text-slate-300 break-words">{value}</span>
     </div>
   );
 }
