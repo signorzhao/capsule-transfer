@@ -266,7 +266,15 @@ function Shell() {
     for (const cap of selectedCapsules) {
       for (const peer of peers) {
         try {
-          await api.send({ capsule_id: cap.uuid || cap.id, target_ip: peer.ip, target_port: peer.port, target_name: peer.name });
+          await api.send({
+            capsule_id: cap.uuid || cap.id,
+            contact_id: peer.id,
+            target_peer_id: peer.peer_id,
+            target_public_key: peer.public_key,
+            target_ip: peer.last_ip || peer.ip,
+            target_port: peer.last_port || peer.port,
+            target_name: peer.name,
+          });
           successCount += 1;
         } catch (e) {
           toast.error(`发送 "${cap.name}" → ${peer.name} 失败：${e.message}`);
@@ -463,8 +471,9 @@ function Shell() {
 
   const handlePingContact = async (contact) => {
     try {
-      const r = await api.pingContact({ ip: contact.ip, port: contact.port });
-      toast[r.data?.online ? 'success' : 'error'](r.data?.online ? `${contact.name} 在线（${r.data.latency_ms} ms）` : `${contact.name} 不可达`);
+      const r = await api.pingContact({ contact_id: contact.id, ip: contact.last_ip || contact.ip, port: contact.last_port || contact.port });
+      const trusted = r.data?.identity?.peer_id ? '，身份已验证' : '';
+      toast[r.data?.online ? 'success' : 'error'](r.data?.online ? `${contact.name} 在线（${r.data.latency_ms} ms${trusted}）` : `${contact.name} 不可达`);
       refreshAll();
     } catch (e) {
       toast.error(`Ping 失败：${e.message}`);
@@ -530,7 +539,7 @@ function Shell() {
     }
   };
 
-  const onlineContacts = useMemo(() => contacts.filter((c) => c.last_seen && Date.now() - new Date(`${c.last_seen}Z`).getTime() < 5 * 60 * 1000), [contacts]);
+  const onlineContacts = useMemo(() => contacts.filter((c) => c.last_seen && Date.now() - new Date(c.last_seen).getTime() < 5 * 60 * 1000), [contacts]);
   const myInfoLine = networkInfo ? `${networkInfo.hostname} · ${networkInfo.ip}:${networkInfo.port}` : '正在探测本机网络…';
 
   return (
@@ -719,10 +728,37 @@ function ContactsView({ contacts, onlineContacts, onSend, onDelete, onPing, show
       {showAddForm && <AddContactForm onCancel={() => setShowAddForm(false)} onSubmit={onAdd} />}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {contacts.map((contact) => {
-          const online = contact.last_seen && Date.now() - new Date(`${contact.last_seen}Z`).getTime() < 5 * 60 * 1000;
-          return <div key={contact.id} className="bg-[#1a1d24] border border-slate-800 p-5 rounded-2xl flex items-start justify-between group"><div className="flex items-center space-x-4"><div className="relative"><div className="w-12 h-12 bg-slate-700 rounded-full flex items-center justify-center text-xl font-bold text-slate-400 uppercase">{(contact.name || '?')[0]}</div>{online && <div className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-emerald-500 border-2 border-[#1a1d24] rounded-full" />}</div><div><h3 className="font-bold text-slate-200">{contact.name}</h3><p className="text-xs text-slate-500 font-mono mt-1">{contact.ip}:{contact.port}</p><p className={`text-[10px] mt-2 ${online ? 'text-emerald-500' : 'text-slate-600'}`}>{online ? '● 最近 5 分钟在线' : contact.last_seen ? `上次出现: ${formatDate(contact.last_seen)}` : '未探测'}</p></div></div><div className="flex flex-col space-y-2"><button onClick={() => onSend(contact)} className="p-2 bg-indigo-600 rounded-lg text-white hover:bg-indigo-500"><Zap size={16} fill="white" /></button><button onClick={() => onPing(contact)} className="p-2 text-slate-500 hover:text-slate-200"><RefreshCw size={16} /></button><button onClick={() => onDelete(contact)} className="p-2 text-slate-600 hover:text-red-400"><Trash2 size={16} /></button></div></div>;
+          const online = contact.last_seen && Date.now() - new Date(contact.last_seen).getTime() < 5 * 60 * 1000;
+          const trusted = Boolean(contact.peer_id && contact.public_key);
+          const address = `${contact.last_ip || contact.ip}:${contact.last_port || contact.port}`;
+          return (
+            <div key={contact.id} className="bg-[#1a1d24] border border-slate-800 p-5 rounded-2xl flex items-start justify-between gap-4 group">
+              <div className="flex items-center space-x-4 min-w-0">
+                <div className="relative shrink-0">
+                  <div className="w-12 h-12 bg-slate-700 rounded-full flex items-center justify-center text-xl font-bold text-slate-400 uppercase">{(contact.name || '?')[0]}</div>
+                  {online && <div className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-emerald-500 border-2 border-[#1a1d24] rounded-full" />}
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <h3 className="font-bold text-slate-200 truncate">{contact.name}</h3>
+                    <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] ${trusted ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300' : 'border-amber-500/25 bg-amber-500/10 text-amber-300'}`}>
+                      {trusted ? '可信设备' : '仅 IP'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 font-mono mt-1 truncate">{address}</p>
+                  {trusted && <p className="text-[10px] text-slate-600 font-mono mt-1 truncate">ID {contact.peer_id?.slice(0, 8)} · {contact.fingerprint}</p>}
+                  <p className={`text-[10px] mt-2 ${online ? 'text-emerald-500' : 'text-slate-600'}`}>{online ? '● 最近 5 分钟在线' : contact.last_seen ? `上次出现: ${formatDate(contact.last_seen)}` : '未探测'}</p>
+                </div>
+              </div>
+              <div className="flex flex-col space-y-2 shrink-0">
+                <button onClick={() => onSend(contact)} className="p-2 bg-indigo-600 rounded-lg text-white hover:bg-indigo-500" title="发送"><Zap size={16} fill="white" /></button>
+                <button onClick={() => onPing(contact)} className="p-2 text-slate-500 hover:text-slate-200" title="验证当前地址"><RefreshCw size={16} /></button>
+                <button onClick={() => onDelete(contact)} className="p-2 text-slate-600 hover:text-red-400" title="删除联系人"><Trash2 size={16} /></button>
+              </div>
+            </div>
+          );
         })}
-        <div onClick={() => setShowAddForm(true)} className="border-2 border-dashed border-slate-800 rounded-2xl flex flex-col items-center justify-center p-6 text-slate-600 hover:border-slate-700 hover:text-slate-500 cursor-pointer"><Search size={24} className="mb-2" /><span className="text-sm font-medium">手动添加 IP</span></div>
+        <div onClick={() => setShowAddForm(true)} className="border-2 border-dashed border-slate-800 rounded-2xl flex flex-col items-center justify-center p-6 text-slate-600 hover:border-slate-700 hover:text-slate-500 cursor-pointer"><Search size={24} className="mb-2" /><span className="text-sm font-medium">添加设备 / IP</span></div>
       </div>
     </div>
   );
@@ -734,7 +770,7 @@ function AddContactForm({ onCancel, onSubmit }) {
     const parsed = parseHostPort(value);
     setForm((prev) => ({ ...prev, ip: parsed.ip, port: parsed.port || prev.port }));
   };
-  return <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-5 mb-6"><h3 className="text-sm font-bold text-slate-200 mb-4">添加联系人</h3><div className="grid grid-cols-1 md:grid-cols-2 gap-3"><FormField label="名称"><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></FormField><FormField label="IP"><input value={form.ip} placeholder="可粘贴 IP:端口" onChange={(e) => updateIp(e.target.value)} /></FormField><FormField label="端口"><input value={form.port} placeholder="默认 5005" onChange={(e) => setForm({ ...form, port: e.target.value.replace(/\D/g, '').slice(0, 5) })} /></FormField><FormField label="备注"><input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></FormField></div><div className="flex justify-end space-x-2 mt-5"><button onClick={onCancel} className="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button><button onClick={() => form.name && form.ip && onSubmit({ ...form, port: Number(form.port) || 5005 })} className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg">保存</button></div></div>;
+  return <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-5 mb-6"><h3 className="text-sm font-bold text-slate-200 mb-4">添加联系人</h3><div className="grid grid-cols-1 md:grid-cols-2 gap-3"><FormField label="名称"><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></FormField><FormField label="当前 IP"><input value={form.ip} placeholder="可粘贴 IP:端口" onChange={(e) => updateIp(e.target.value)} /></FormField><FormField label="端口"><input value={form.port} placeholder="默认 5005" onChange={(e) => setForm({ ...form, port: e.target.value.replace(/\D/g, '').slice(0, 5) })} /></FormField><FormField label="备注"><input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></FormField></div><p className="mt-3 text-xs text-slate-500">保存时会尝试读取对方设备身份；成功后联系人会绑定 peer ID，IP 变化时发送前自动重新定位。</p><div className="flex justify-end space-x-2 mt-5"><button onClick={onCancel} className="px-4 py-2 text-sm text-slate-400 hover:text-white">取消</button><button onClick={() => form.name && form.ip && onSubmit({ ...form, port: Number(form.port) || 5005 })} className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg">保存</button></div></div>;
 }
 
 function FormField({ label, children }) {
@@ -746,7 +782,7 @@ function TransferView({ capsules, contacts, selectedCapsules, setSelectedCapsule
   const toggleTarget = (contact) => setTargetContacts((prev) => (prev.find((c) => c.id === contact.id) ? prev.filter((c) => c.id !== contact.id) : [...prev, contact]));
   const totalTasks = selectedCapsules.length * (targetContacts.length + (tempPeer.ip ? 1 : 0));
 
-  return <div className="max-w-2xl mx-auto mt-6"><div className="bg-[#1a1d24] p-8 rounded-3xl border border-slate-800 shadow-2xl relative overflow-hidden"><h2 className="text-xl font-bold text-white mb-6 flex items-center"><Send size={20} className="mr-2 text-indigo-500" />发送胶囊</h2><div className="mb-8"><label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">目标联系人</label><div className="grid grid-cols-2 gap-3">{contacts.map((c) => { const selected = targetContacts.find((tc) => tc.id === c.id); return <button key={c.id} onClick={() => toggleTarget(c)} className={`flex items-center space-x-3 bg-[#0f1115] p-3 rounded-xl border text-left ${selected ? 'border-indigo-500 bg-indigo-600/5' : 'border-slate-800 hover:border-indigo-500'}`}><div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs ${selected ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}>{selected ? <Check size={14} /> : (c.name || '?')[0]}</div><div className="min-w-0"><div className="text-xs font-medium truncate">{c.name}</div><div className="text-[10px] text-slate-500 font-mono truncate">{c.ip}:{c.port}</div></div></button>; })}<button onClick={() => setShowTempPeerForm((v) => !v)} className="flex items-center justify-center space-x-2 bg-[#0f1115] p-3 rounded-xl border border-slate-800 hover:border-slate-700 text-slate-500"><Plus size={14} /><span className="text-xs">临时 IP</span></button></div>{showTempPeerForm && <div className="grid grid-cols-3 gap-3 mt-3"><input className="col-span-2 bg-[#0f1115] border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200" placeholder="对方 IP" value={tempPeer.ip} onChange={(e) => setTempPeer({ ...tempPeer, ip: e.target.value })} /><input className="bg-[#0f1115] border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200" placeholder="端口" value={tempPeer.port} onChange={(e) => setTempPeer({ ...tempPeer, port: e.target.value })} /></div>}</div><div className="mb-10"><label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">选择内容</label><div className="space-y-2 max-h-56 overflow-y-auto custom-scrollbar pr-1">{capsules.length === 0 && <div className="text-xs text-slate-500 bg-[#0f1115] border border-slate-800 rounded-xl p-3">胶囊库为空。</div>}{capsules.map((cap) => { const selected = selectedCapsules.find((sc) => sc.id === cap.id); return <button key={cap.id} onClick={() => toggleCapsule(cap)} className={`w-full text-left bg-[#0f1115] p-3 rounded-xl border flex items-center justify-between ${selected ? 'border-indigo-500 bg-indigo-600/5' : 'border-slate-800 hover:border-indigo-500'}`}><div className="flex items-center space-x-3 min-w-0"><div className={`w-5 h-5 rounded flex items-center justify-center ${selected ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-500'}`}>{selected ? <Check size={12} /> : null}</div><FileAudio className="text-indigo-400 shrink-0" size={16} /><span className="text-xs truncate">{cap.name}</span></div><span className="text-[10px] text-slate-500">{formatBytes(cap.size_bytes)}</span></button>; })}</div></div>{totalTasks > 0 && <div className="mb-4 text-xs text-slate-400 text-center">将发送 {selectedCapsules.length} 个胶囊 → {targetContacts.length + (tempPeer.ip ? 1 : 0)} 个目标（共 {totalTasks} 项任务）</div>}<button disabled={selectedCapsules.length === 0 || totalTasks === 0 || isSending} onClick={onSend} className={`w-full py-4 rounded-2xl font-bold flex items-center justify-center space-x-2 ${isSending || selectedCapsules.length === 0 || totalTasks === 0 ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/30'}`}>{isSending ? <span>正在发射…</span> : <><Zap size={18} fill="currentColor" /><span>立即发送</span></>}</button>{isSending && <div className="absolute bottom-0 left-0 w-full bg-slate-800 h-1 overflow-hidden"><div className="bg-indigo-500 h-full w-1/3 animate-pulse" /></div>}</div></div>;
+  return <div className="max-w-2xl mx-auto mt-6"><div className="bg-[#1a1d24] p-8 rounded-3xl border border-slate-800 shadow-2xl relative overflow-hidden"><h2 className="text-xl font-bold text-white mb-6 flex items-center"><Send size={20} className="mr-2 text-indigo-500" />发送胶囊</h2><div className="mb-8"><label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">目标联系人</label><div className="grid grid-cols-2 gap-3">{contacts.map((c) => { const selected = targetContacts.find((tc) => tc.id === c.id); const trusted = Boolean(c.peer_id && c.public_key); return <button key={c.id} onClick={() => toggleTarget(c)} className={`flex items-center space-x-3 bg-[#0f1115] p-3 rounded-xl border text-left ${selected ? 'border-indigo-500 bg-indigo-600/5' : 'border-slate-800 hover:border-indigo-500'}`}><div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs ${selected ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}>{selected ? <Check size={14} /> : (c.name || '?')[0]}</div><div className="min-w-0"><div className="text-xs font-medium truncate">{c.name}</div><div className="text-[10px] text-slate-500 font-mono truncate">{c.last_ip || c.ip}:{c.last_port || c.port}</div><div className={`text-[10px] ${trusted ? 'text-emerald-400' : 'text-amber-400'}`}>{trusted ? '可信设备' : '仅 IP'}</div></div></button>; })}<button onClick={() => setShowTempPeerForm((v) => !v)} className="flex items-center justify-center space-x-2 bg-[#0f1115] p-3 rounded-xl border border-slate-800 hover:border-slate-700 text-slate-500"><Plus size={14} /><span className="text-xs">临时 IP</span></button></div>{showTempPeerForm && <div className="grid grid-cols-3 gap-3 mt-3"><input className="col-span-2 bg-[#0f1115] border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200" placeholder="对方 IP" value={tempPeer.ip} onChange={(e) => setTempPeer({ ...tempPeer, ip: e.target.value })} /><input className="bg-[#0f1115] border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200" placeholder="端口" value={tempPeer.port} onChange={(e) => setTempPeer({ ...tempPeer, port: e.target.value })} /></div>}</div><div className="mb-10"><label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">选择内容</label><div className="space-y-2 max-h-56 overflow-y-auto custom-scrollbar pr-1">{capsules.length === 0 && <div className="text-xs text-slate-500 bg-[#0f1115] border border-slate-800 rounded-xl p-3">胶囊库为空。</div>}{capsules.map((cap) => { const selected = selectedCapsules.find((sc) => sc.id === cap.id); return <button key={cap.id} onClick={() => toggleCapsule(cap)} className={`w-full text-left bg-[#0f1115] p-3 rounded-xl border flex items-center justify-between ${selected ? 'border-indigo-500 bg-indigo-600/5' : 'border-slate-800 hover:border-indigo-500'}`}><div className="flex items-center space-x-3 min-w-0"><div className={`w-5 h-5 rounded flex items-center justify-center ${selected ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-500'}`}>{selected ? <Check size={12} /> : null}</div><FileAudio className="text-indigo-400 shrink-0" size={16} /><span className="text-xs truncate">{cap.name}</span></div><span className="text-[10px] text-slate-500">{formatBytes(cap.size_bytes)}</span></button>; })}</div></div>{totalTasks > 0 && <div className="mb-4 text-xs text-slate-400 text-center">将发送 {selectedCapsules.length} 个胶囊 → {targetContacts.length + (tempPeer.ip ? 1 : 0)} 个目标（共 {totalTasks} 项任务）</div>}<button disabled={selectedCapsules.length === 0 || totalTasks === 0 || isSending} onClick={onSend} className={`w-full py-4 rounded-2xl font-bold flex items-center justify-center space-x-2 ${isSending || selectedCapsules.length === 0 || totalTasks === 0 ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/30'}`}>{isSending ? <span>正在发射…</span> : <><Zap size={18} fill="currentColor" /><span>立即发送</span></>}</button>{isSending && <div className="absolute bottom-0 left-0 w-full bg-slate-800 h-1 overflow-hidden"><div className="bg-indigo-500 h-full w-1/3 animate-pulse" /></div>}</div></div>;
 }
 
 function SettingsView({ networkInfo, apiBase, bridgeStatus, onRefreshBridge, onOpenSetup }) {
@@ -809,7 +845,7 @@ function SettingsView({ networkInfo, apiBase, bridgeStatus, onRefreshBridge, onO
         <Row k="资源目录" v={bridgeStatus?.confirmed_reaper_resource_path} />
         <Row k="确认时间" v={bridgeStatus?.confirmed_at ? formatDate(bridgeStatus.confirmed_at) : ''} />
       </div>
-      <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 space-y-3 text-sm"><Row k="API 地址" v={apiBase} /><Row k="主机名" v={networkInfo?.hostname} /><Row k="主 IP" v={networkInfo?.ip} /><Row k="监听端口" v={networkInfo?.port} /><Row k="所有 IP" v={(networkInfo?.all_ips || []).join('  ·  ')} /><Row k="共享密钥" v={networkInfo?.shared_token_required ? '已启用' : '未启用'} /></div>
+      <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 space-y-3 text-sm"><Row k="API 地址" v={apiBase} /><Row k="主机名" v={networkInfo?.hostname} /><Row k="设备 ID" v={networkInfo?.peer_id} /><Row k="身份指纹" v={networkInfo?.peer_fingerprint} /><Row k="主 IP" v={networkInfo?.ip} /><Row k="监听端口" v={networkInfo?.port} /><Row k="所有 IP" v={(networkInfo?.all_ips || []).join('  ·  ')} /><Row k="共享密钥" v={networkInfo?.shared_token_required ? '已启用' : '未启用'} /></div>
       <p className="text-xs text-slate-500 mt-4 leading-relaxed">提示：仅在你信任的局域网内运行。若启用了共享密钥，发送方需在请求头携带相同的 <code className="text-slate-300">X-Capsule-Token</code>。</p>
     </div>
   );

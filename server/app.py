@@ -7,6 +7,10 @@
 from __future__ import annotations
 
 import io
+import base64
+import concurrent.futures
+import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -25,6 +29,9 @@ from pathlib import Path
 import requests
 from flask import Flask, Response, jsonify, request, send_file
 from flask_cors import CORS
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
 from bundle import build_bundle, extract_bundle
 from net import network_info
@@ -131,7 +138,19 @@ CORS(
     app,
     resources={r"/api/*": {"origins": "*"}},
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "X-Capsule-Token", "X-Accept-Token"],
+    allow_headers=[
+        "Content-Type",
+        "X-Capsule-Token",
+        "X-Accept-Token",
+        "X-Capsule-Peer-IP",
+        "X-Capsule-Peer-Name",
+        "X-Capsule-Peer-ID",
+        "X-Capsule-Peer-Public-Key",
+        "X-Capsule-Peer-Signature",
+        "X-Capsule-Peer-Nonce",
+        "X-Capsule-Peer-Timestamp",
+        "X-Capsule-Bundle-SHA256",
+    ],
 )
 
 
@@ -196,6 +215,102 @@ def _notify_sse(event_data: dict):
 
 def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
+
+
+def _b64_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64_decode(value: str) -> bytes:
+    padded = value + "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def _public_key_fingerprint(public_key: str) -> str:
+    return hashlib.sha256(public_key.encode("utf-8")).hexdigest()[:16]
+
+
+def _get_local_identity() -> dict:
+    cfg = load_config()
+    identity = cfg.get("peer_identity") or {}
+    private_key_b64 = identity.get("private_key") or ""
+    public_key_b64 = identity.get("public_key") or ""
+    if private_key_b64 and public_key_b64:
+        peer_id = identity.get("peer_id") or hashlib.sha256(public_key_b64.encode("utf-8")).hexdigest()[:32]
+        return {
+            "peer_id": peer_id,
+            "public_key": public_key_b64,
+            "private_key": private_key_b64,
+            "fingerprint": _public_key_fingerprint(public_key_b64),
+        }
+
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key()
+    private_raw = private_key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+    public_raw = public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)
+    public_key_b64 = _b64_encode(public_raw)
+    private_key_b64 = _b64_encode(private_raw)
+    peer_id = hashlib.sha256(public_key_b64.encode("utf-8")).hexdigest()[:32]
+    identity = {
+        "peer_id": peer_id,
+        "public_key": public_key_b64,
+        "private_key": private_key_b64,
+        "fingerprint": _public_key_fingerprint(public_key_b64),
+        "created_at": _now_iso(),
+    }
+    cfg["peer_identity"] = identity
+    save_config(cfg)
+    return identity
+
+
+def _peer_signature_payload(action: str, nonce: str, timestamp: str, extra: dict | None = None) -> bytes:
+    payload = {"action": action, "nonce": nonce, "timestamp": timestamp, "extra": extra or {}}
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _sign_peer_payload(action: str, extra: dict | None = None) -> dict:
+    identity = _get_local_identity()
+    nonce = uuid_lib.uuid4().hex
+    timestamp = str(int(time.time()))
+    private_key = Ed25519PrivateKey.from_private_bytes(_b64_decode(identity["private_key"]))
+    signature = private_key.sign(_peer_signature_payload(action, nonce, timestamp, extra))
+    return {
+        "peer_id": identity["peer_id"],
+        "public_key": identity["public_key"],
+        "nonce": nonce,
+        "timestamp": timestamp,
+        "signature": _b64_encode(signature),
+    }
+
+
+def _verify_peer_payload(public_key: str, action: str, nonce: str, timestamp: str, signature: str, extra: dict | None = None) -> tuple[bool, str]:
+    try:
+        ts = int(timestamp)
+    except (TypeError, ValueError):
+        return False, "peer timestamp invalid"
+    if abs(time.time() - ts) > 5 * 60:
+        return False, "peer signature expired"
+    try:
+        key = Ed25519PublicKey.from_public_bytes(_b64_decode(public_key))
+        key.verify(_b64_decode(signature), _peer_signature_payload(action, nonce, timestamp, extra))
+        return True, ""
+    except (InvalidSignature, ValueError, TypeError) as exc:
+        return False, f"peer signature invalid: {exc}"
+
+
+def _identity_response() -> dict:
+    identity = _get_local_identity()
+    info = network_info(PORT)
+    return {
+        "peer_id": identity["peer_id"],
+        "public_key": identity["public_key"],
+        "fingerprint": identity["fingerprint"],
+        "hostname": info.get("hostname", ""),
+        "ip": info.get("ip", ""),
+        "all_ips": info.get("all_ips", []),
+        "port": PORT,
+        "receive_mode": _get_receive_mode(),
+    }
 
 
 def _ps_single_quote(value: str) -> str:
@@ -591,6 +706,165 @@ def _contacts_next_id(contacts: list[dict]) -> int:
     return max((c.get("id", 0) for c in contacts), default=0) + 1
 
 
+def _contact_host(contact: dict) -> str:
+    return (contact.get("last_ip") or contact.get("ip") or "").strip()
+
+
+def _contact_port(contact: dict) -> int:
+    return int(contact.get("last_port") or contact.get("port") or 5005)
+
+
+def _normalize_contact(contact: dict) -> dict:
+    if "last_ip" not in contact:
+        contact["last_ip"] = contact.get("ip", "")
+    if "last_port" not in contact:
+        contact["last_port"] = contact.get("port", 5005)
+    contact["ip"] = contact.get("ip") or contact.get("last_ip") or ""
+    contact["port"] = int(contact.get("port") or contact.get("last_port") or 5005)
+    contact["trusted"] = bool(contact.get("peer_id") and contact.get("public_key"))
+    if contact.get("public_key") and not contact.get("fingerprint"):
+        contact["fingerprint"] = _public_key_fingerprint(contact["public_key"])
+    return contact
+
+
+def _normalize_contacts(contacts: list[dict]) -> list[dict]:
+    return [_normalize_contact(c) for c in contacts]
+
+
+def _find_contact_by_identity(contacts: list[dict], peer_id: str | None, public_key: str | None = None) -> dict | None:
+    if not peer_id:
+        return None
+    for contact in contacts:
+        if contact.get("peer_id") != peer_id:
+            continue
+        if public_key and contact.get("public_key") and contact.get("public_key") != public_key:
+            return {"_identity_mismatch": True, **contact}
+        return contact
+    return None
+
+
+def _probe_peer_identity(ip: str, port: int = 5005, timeout: float = 1.2) -> dict | None:
+    if not ip:
+        return None
+    try:
+        resp = requests.get(f"http://{ip}:{int(port)}/api/identity", timeout=timeout)
+        if not resp.ok:
+            return None
+        data = resp.json().get("data") or {}
+        if not data.get("peer_id") or not data.get("public_key"):
+            return None
+        data["ip"] = ip
+        data["port"] = int(data.get("port") or port)
+        data["fingerprint"] = data.get("fingerprint") or _public_key_fingerprint(data["public_key"])
+        return data
+    except Exception:
+        return None
+
+
+def _candidate_peer_ips() -> list[str]:
+    info = network_info(PORT)
+    candidates: list[str] = []
+    for ip in info.get("all_ips", []):
+        try:
+            iface = ipaddress.ip_interface(f"{ip}/24")
+        except ValueError:
+            continue
+        for host in iface.network.hosts():
+            host_ip = str(host)
+            if host_ip != ip and host_ip not in candidates:
+                candidates.append(host_ip)
+    return candidates[:512]
+
+
+def _discover_peers(port: int = 5005, peer_id: str | None = None, public_key: str | None = None, timeout: float = 0.45) -> list[dict]:
+    found: list[dict] = []
+    local_identity = _get_local_identity()
+    candidate_ips = _candidate_peer_ips()
+
+    def probe(ip: str) -> dict | None:
+        identity = _probe_peer_identity(ip, port=port, timeout=timeout)
+        if not identity or identity.get("peer_id") == local_identity.get("peer_id"):
+            return None
+        if peer_id and identity.get("peer_id") != peer_id:
+            return None
+        if public_key and identity.get("public_key") != public_key:
+            return None
+        return identity
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
+        futures = [executor.submit(probe, ip) for ip in candidate_ips]
+        done, pending = concurrent.futures.wait(futures, timeout=max(2.0, timeout * len(futures) / 16 if futures else 0))
+        for future in pending:
+            future.cancel()
+        for future in done:
+            try:
+                result = future.result()
+            except Exception:
+                result = None
+            if result:
+                found.append(result)
+                if peer_id:
+                    break
+    return found
+
+
+def _update_contact_from_identity(contact: dict, identity: dict, source: str = "identity") -> dict:
+    contact["peer_id"] = identity.get("peer_id") or contact.get("peer_id", "")
+    contact["public_key"] = identity.get("public_key") or contact.get("public_key", "")
+    contact["fingerprint"] = identity.get("fingerprint") or _public_key_fingerprint(contact["public_key"])
+    contact["trusted"] = bool(contact.get("peer_id") and contact.get("public_key"))
+    contact["ip"] = identity.get("ip") or contact.get("ip", "")
+    contact["port"] = int(identity.get("port") or contact.get("port") or 5005)
+    contact["last_ip"] = contact["ip"]
+    contact["last_port"] = contact["port"]
+    contact["last_seen"] = _now_iso()
+    contact["verified_at"] = _now_iso()
+    contact["address_source"] = source
+    return contact
+
+
+def _resolve_target_peer(data: dict) -> tuple[dict | None, tuple[str, int, str] | None, str | None]:
+    contacts = _normalize_contacts(_load_contacts())
+    contact = None
+    contact_id = data.get("contact_id")
+    if contact_id is not None:
+        try:
+            cid = int(contact_id)
+            contact = next((c for c in contacts if c.get("id") == cid), None)
+        except (TypeError, ValueError):
+            contact = None
+    if not contact and data.get("target_peer_id"):
+        contact = _find_contact_by_identity(contacts, data.get("target_peer_id"), data.get("target_public_key"))
+        if contact and contact.get("_identity_mismatch"):
+            return None, None, "联系人身份密钥不匹配，已阻止发送。"
+
+    target_ip = (data.get("target_ip") or (_contact_host(contact) if contact else "") or "").strip()
+    target_port = int(data.get("target_port") or (_contact_port(contact) if contact else 5005))
+    target_name = data.get("target_name") or (contact.get("name") if contact else f"{target_ip}:{target_port}")
+    expected_peer_id = (contact or {}).get("peer_id") or data.get("target_peer_id")
+    expected_public_key = (contact or {}).get("public_key") or data.get("target_public_key")
+
+    identity = _probe_peer_identity(target_ip, target_port) if target_ip else None
+    if expected_peer_id:
+        if not identity or identity.get("peer_id") != expected_peer_id or (expected_public_key and identity.get("public_key") != expected_public_key):
+            discovered = _discover_peers(port=target_port, peer_id=expected_peer_id, public_key=expected_public_key)
+            identity = discovered[0] if discovered else None
+        if not identity:
+            return contact, None, "无法找到该可信联系人当前地址。请确认对方在线，或临时填写当前 IP。"
+        target_ip = identity["ip"]
+        target_port = int(identity.get("port") or target_port)
+        if contact:
+            _update_contact_from_identity(contact, identity, source="discover")
+            _save_contacts(contacts)
+    elif identity and contact:
+        _update_contact_from_identity(contact, identity, source="direct")
+        _save_contacts(contacts)
+
+    if not target_ip:
+        return contact, None, "缺少目标 IP"
+    return contact, (target_ip, target_port, target_name), None
+
+
 # ---------------------- 健康检查 / 网络信息 ----------------------
 
 @app.route("/api/health", methods=["GET"])
@@ -602,7 +876,25 @@ def health():
 def get_network_info():
     info = network_info(PORT)
     info["shared_token_required"] = bool(SHARED_TOKEN)
+    identity = _get_local_identity()
+    info["peer_id"] = identity["peer_id"]
+    info["peer_fingerprint"] = identity["fingerprint"]
     return _ok(info)
+
+
+@app.route("/api/identity", methods=["GET"])
+def get_identity():
+    return _ok(_identity_response())
+
+
+@app.route("/api/peers/discover", methods=["GET", "POST"])
+def discover_peers():
+    data = request.get_json(silent=True) or {}
+    peer_id = request.args.get("peer_id") or data.get("peer_id")
+    public_key = request.args.get("public_key") or data.get("public_key")
+    port = int(request.args.get("port") or data.get("port") or 5005)
+    peers = _discover_peers(port=port, peer_id=peer_id, public_key=public_key)
+    return _ok({"items": peers})
 
 
 @app.route("/api/events", methods=["GET"])
@@ -1175,7 +1467,9 @@ else:
 
 @app.route("/api/contacts", methods=["GET"])
 def list_contacts():
-    return _ok({"items": _load_contacts()})
+    contacts = _normalize_contacts(_load_contacts())
+    _save_contacts(contacts)
+    return _ok({"items": contacts})
 
 
 @app.route("/api/contacts", methods=["POST"])
@@ -1187,24 +1481,42 @@ def create_contact():
     note = data.get("note")
     if not name or not ip:
         return _err("name 和 ip 必填", 400)
-    contacts = _load_contacts()
-    existing = next((c for c in contacts if c["ip"] == ip and c["port"] == port), None)
+    contacts = _normalize_contacts(_load_contacts())
+    identity = _probe_peer_identity(ip, port)
+    existing = None
+    if identity:
+        existing = _find_contact_by_identity(contacts, identity.get("peer_id"), identity.get("public_key"))
+        if existing and existing.get("_identity_mismatch"):
+            return _err("该 peer_id 已存在但公钥不同，已阻止覆盖联系人。", 409)
+    if not existing:
+        existing = next((c for c in contacts if _contact_host(c) == ip and _contact_port(c) == port), None)
     if existing:
         existing["name"] = name
+        existing["ip"] = ip
+        existing["port"] = port
+        existing["last_ip"] = ip
+        existing["last_port"] = port
         if note is not None:
             existing["note"] = note
+        if identity:
+            _update_contact_from_identity(existing, identity, source="manual")
     else:
-        contacts.append({
+        contact = {
             "id": _contacts_next_id(contacts),
             "name": name,
             "ip": ip,
             "port": port,
+            "last_ip": ip,
+            "last_port": port,
             "note": note or "",
             "last_seen": None,
             "created_at": _now_iso(),
-        })
+        }
+        if identity:
+            _update_contact_from_identity(contact, identity, source="manual")
+        contacts.append(_normalize_contact(contact))
     _save_contacts(contacts)
-    target = next((c for c in contacts if c["ip"] == ip and c["port"] == port), None)
+    target = existing or next((c for c in contacts if _contact_host(c) == ip and _contact_port(c) == port), None)
     return _ok(target), 201
 
 
@@ -1221,22 +1533,28 @@ def delete_contact(contact_id: int):
 @app.route("/api/contacts/ping", methods=["POST"])
 def ping_contact():
     data = request.get_json(silent=True) or {}
-    ip = data.get("ip")
-    port = int(data.get("port") or 5005)
+    contacts = _normalize_contacts(_load_contacts())
+    contact = None
+    if data.get("contact_id") is not None:
+        try:
+            contact = next((c for c in contacts if c.get("id") == int(data.get("contact_id"))), None)
+        except (TypeError, ValueError):
+            contact = None
+    ip = data.get("ip") or (_contact_host(contact) if contact else "")
+    port = int(data.get("port") or (_contact_port(contact) if contact else 5005))
     if not ip:
         return _err("ip 必填", 400)
     started = time.time()
     try:
-        r = requests.get(f"http://{ip}:{port}/api/health", timeout=2.0)
-        ok = r.ok
+        identity = _probe_peer_identity(ip, port, timeout=2.0)
+        ok = bool(identity)
         latency_ms = int((time.time() - started) * 1000)
         if ok:
-            contacts = _load_contacts()
             for c in contacts:
-                if c["ip"] == ip and c["port"] == port:
-                    c["last_seen"] = _now_iso()
+                if (contact and c.get("id") == contact.get("id")) or (identity and c.get("peer_id") == identity.get("peer_id")) or (_contact_host(c) == ip and _contact_port(c) == port):
+                    _update_contact_from_identity(c, identity, source="ping")
             _save_contacts(contacts)
-        return _ok({"online": ok, "latency_ms": latency_ms, "status": r.status_code})
+        return _ok({"online": ok, "latency_ms": latency_ms, "identity": identity})
     except Exception as e:
         return _ok({"online": False, "error": str(e)})
 
@@ -1268,9 +1586,40 @@ def p2p_request():
     data = request.get_json(silent=True) or {}
     sender_ip = data.get("sender_ip") or request.remote_addr or "unknown"
     sender_name = data.get("sender_name") or sender_ip
+    sender_peer_id = data.get("sender_peer_id") or ""
+    sender_public_key = data.get("sender_public_key") or ""
+    sender_signature = data.get("sender_signature") or ""
+    sender_nonce = data.get("sender_nonce") or ""
+    sender_timestamp = data.get("sender_timestamp") or ""
     capsule_name = data.get("capsule_name") or "胶囊"
     capsule_type = data.get("capsule_type") or ""
     size_bytes = data.get("size_bytes") or 0
+    trusted_sender = False
+    if sender_peer_id or sender_public_key or sender_signature:
+        request_extra = {
+            "capsule_id": data.get("capsule_id") or "",
+            "capsule_name": capsule_name,
+            "capsule_type": capsule_type,
+            "size_bytes": size_bytes,
+        }
+        if not (sender_peer_id and sender_public_key and sender_signature and sender_nonce and sender_timestamp):
+            return _err("发送方身份签名不完整", 401)
+        ok, verify_msg = _verify_peer_payload(sender_public_key, "p2p_request", sender_nonce, sender_timestamp, sender_signature, request_extra)
+        if not ok:
+            return _err(verify_msg, 401)
+        if hashlib.sha256(sender_public_key.encode("utf-8")).hexdigest()[:32] != sender_peer_id:
+            return _err("发送方 peer_id 与公钥不匹配", 401)
+        contacts = _normalize_contacts(_load_contacts())
+        known = _find_contact_by_identity(contacts, sender_peer_id, sender_public_key)
+        if known and known.get("_identity_mismatch"):
+            return _err("发送方身份与已保存联系人不匹配", 403)
+        if known:
+            known["last_ip"] = sender_ip
+            known["ip"] = sender_ip
+            known["last_seen"] = _now_iso()
+            known["verified_at"] = _now_iso()
+            _save_contacts(contacts)
+            trusted_sender = True
 
     if mode == "auto":
         token = str(uuid_lib.uuid4())
@@ -1282,6 +1631,9 @@ def p2p_request():
                 "capsule_name": capsule_name,
                 "capsule_type": capsule_type,
                 "size_bytes": size_bytes,
+                "sender_peer_id": sender_peer_id,
+                "sender_public_key": sender_public_key,
+                "trusted_sender": trusted_sender,
                 "status": "accepted",
                 "created_at": time.time(),
             }
@@ -1296,6 +1648,9 @@ def p2p_request():
         "capsule_name": capsule_name,
         "capsule_type": capsule_type,
         "size_bytes": size_bytes,
+        "sender_peer_id": sender_peer_id,
+        "sender_public_key": sender_public_key,
+        "trusted_sender": trusted_sender,
         "status": "pending",
         "created_at": time.time(),
     }
@@ -1377,16 +1732,51 @@ def p2p_import():
         return _err("缺少字段 bundle（zip 文件）", 400)
 
     f = request.files["bundle"]
+    bundle_bytes = f.read()
+    bundle_sha256 = hashlib.sha256(bundle_bytes).hexdigest()
     sender_ip = request.headers.get("X-Capsule-Peer-IP") or request.remote_addr or "unknown"
     sender_name = request.headers.get("X-Capsule-Peer-Name") or sender_ip
+    sender_peer_id = request.headers.get("X-Capsule-Peer-ID", "").strip()
+    sender_public_key = request.headers.get("X-Capsule-Peer-Public-Key", "").strip()
+    sender_signature = request.headers.get("X-Capsule-Peer-Signature", "").strip()
+    sender_nonce = request.headers.get("X-Capsule-Peer-Nonce", "").strip()
+    sender_timestamp = request.headers.get("X-Capsule-Peer-Timestamp", "").strip()
+    sent_bundle_sha256 = request.headers.get("X-Capsule-Bundle-SHA256", "").strip()
+    trusted_sender = False
+    if sent_bundle_sha256 and sent_bundle_sha256 != bundle_sha256:
+        return _err("bundle hash mismatch", 400)
+    if sender_peer_id or sender_public_key or sender_signature:
+        accept_token = request.headers.get("X-Accept-Token", "").strip()
+        import_extra = {"accept_token": accept_token, "bundle_sha256": bundle_sha256}
+        if not (sender_peer_id and sender_public_key and sender_signature and sender_nonce and sender_timestamp):
+            return _err("发送方身份签名不完整", 401)
+        ok, verify_msg = _verify_peer_payload(sender_public_key, "p2p_import", sender_nonce, sender_timestamp, sender_signature, import_extra)
+        if not ok:
+            return _err(verify_msg, 401)
+        if hashlib.sha256(sender_public_key.encode("utf-8")).hexdigest()[:32] != sender_peer_id:
+            return _err("发送方 peer_id 与公钥不匹配", 401)
+        contacts = _normalize_contacts(_load_contacts())
+        known = _find_contact_by_identity(contacts, sender_peer_id, sender_public_key)
+        if known and known.get("_identity_mismatch"):
+            return _err("发送方身份与已保存联系人不匹配", 403)
+        if known:
+            known["last_ip"] = sender_ip
+            known["ip"] = sender_ip
+            known["last_seen"] = _now_iso()
+            known["verified_at"] = _now_iso()
+            _save_contacts(contacts)
+            trusted_sender = True
     peer_label = sender_name if sender_name == sender_ip else f"{sender_name} ({sender_ip})"
 
     try:
-        manifest, final_dir, size_bytes = extract_bundle(f.stream, CAPSULES_DIR)
+        manifest, final_dir, size_bytes = extract_bundle(io.BytesIO(bundle_bytes), CAPSULES_DIR)
     except ValueError as e:
         return _err(str(e), 400)
 
     manifest.setdefault("capsule", {})["source_peer"] = peer_label
+    if sender_peer_id:
+        manifest.setdefault("capsule", {})["source_peer_id"] = sender_peer_id
+        manifest.setdefault("capsule", {})["source_peer_trusted"] = trusted_sender
     _write_manifest(final_dir, manifest)
     cap = _capsule_from_dir(final_dir)
     logger.info("接收胶囊 %s 来自 %s (%d bytes)", cap.get("name"), peer_label, size_bytes)
@@ -1398,9 +1788,10 @@ def p2p_import():
 def p2p_send():
     data = request.get_json(silent=True) or {}
     capsule_id = data.get("capsule_id")
-    target_ip = (data.get("target_ip") or "").strip()
-    target_port = int(data.get("target_port") or 5005)
-    target_name = data.get("target_name") or f"{target_ip}:{target_port}"
+    contact, resolved, resolve_error = _resolve_target_peer(data)
+    if resolve_error:
+        return _err(resolve_error, 404)
+    target_ip, target_port, target_name = resolved or ("", 5005, "")
     if not capsule_id or not target_ip:
         return _err("capsule_id 与 target_ip 必填", 400)
 
@@ -1413,12 +1804,24 @@ def p2p_send():
 
     self_info = network_info(PORT)
     blob = build_bundle(cap, capsule_root, sender=self_info)
+    request_extra = {
+        "capsule_id": cap.get("uuid") or "",
+        "capsule_name": cap.get("name") or "",
+        "capsule_type": cap.get("capsule_type") or "",
+        "size_bytes": len(blob),
+    }
+    request_signature = _sign_peer_payload("p2p_request", request_extra)
     try:
         req_resp = requests.post(
             f"http://{target_ip}:{target_port}/api/p2p/request",
             json={
                 "sender_ip": self_info.get("ip", ""),
                 "sender_name": self_info.get("hostname", ""),
+                "sender_peer_id": request_signature["peer_id"],
+                "sender_public_key": request_signature["public_key"],
+                "sender_signature": request_signature["signature"],
+                "sender_nonce": request_signature["nonce"],
+                "sender_timestamp": request_signature["timestamp"],
                 "capsule_id": cap.get("uuid"),
                 "capsule_name": cap.get("name"),
                 "capsule_type": cap.get("capsule_type"),
@@ -1462,9 +1865,17 @@ def p2p_send():
         if not accept_token:
             return _err("等待确认超时，对方未响应", 408)
 
+    bundle_sha256 = hashlib.sha256(blob).hexdigest()
+    import_signature = _sign_peer_payload("p2p_import", {"accept_token": accept_token, "bundle_sha256": bundle_sha256})
     headers = {
         "X-Capsule-Peer-IP": self_info.get("ip", ""),
         "X-Capsule-Peer-Name": self_info.get("hostname", ""),
+        "X-Capsule-Peer-ID": import_signature["peer_id"],
+        "X-Capsule-Peer-Public-Key": import_signature["public_key"],
+        "X-Capsule-Peer-Signature": import_signature["signature"],
+        "X-Capsule-Peer-Nonce": import_signature["nonce"],
+        "X-Capsule-Peer-Timestamp": import_signature["timestamp"],
+        "X-Capsule-Bundle-SHA256": bundle_sha256,
         "X-Accept-Token": accept_token,
     }
     if SHARED_TOKEN:
@@ -1483,21 +1894,34 @@ def p2p_send():
     if not resp.ok:
         return _err(f"对方拒绝: HTTP {resp.status_code}", 502)
 
-    contacts = _load_contacts()
-    existing = next((c for c in contacts if c["ip"] == target_ip and c["port"] == target_port), None)
+    contacts = _normalize_contacts(_load_contacts())
+    existing = None
+    if contact:
+        existing = next((c for c in contacts if c.get("id") == contact.get("id")), None)
     if not existing:
+        existing = next((c for c in contacts if _contact_host(c) == target_ip and _contact_port(c) == target_port), None)
+    if existing:
+        existing["ip"] = target_ip
+        existing["port"] = target_port
+        existing["last_ip"] = target_ip
+        existing["last_port"] = target_port
+        existing["last_seen"] = _now_iso()
+        _save_contacts(contacts)
+    else:
         contacts.append({
             "id": _contacts_next_id(contacts),
             "name": target_name,
             "ip": target_ip,
             "port": target_port,
+            "last_ip": target_ip,
+            "last_port": target_port,
             "note": "",
             "last_seen": _now_iso(),
             "created_at": _now_iso(),
         })
         _save_contacts(contacts)
 
-    return _ok({"bytes": len(blob), "remote": resp.json()}, message="已发送")
+    return _ok({"bytes": len(blob), "remote": resp.json(), "resolved_ip": target_ip, "resolved_port": target_port}, message="已发送")
 
 
 # ---------------------- 设置 ----------------------

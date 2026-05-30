@@ -73,6 +73,9 @@ export const api = {
   confirmReaperBridge: (payload = {}) =>
     jsonFetch('/reaper/bridge/confirm', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 15000 }),
   openReaperBridgeScriptFolder: () => jsonFetch('/reaper/bridge/script-folder', { method: 'POST' }),
+  identity: () => jsonFetch('/identity'),
+  discoverPeers: (payload = {}) =>
+    jsonFetch('/peers/discover', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 8000 }),
 
   getSettings: () => jsonFetch('/settings'),
   updateSettings: (payload) =>
