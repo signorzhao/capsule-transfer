@@ -1,8 +1,25 @@
 const API_BASE = (import.meta.env.VITE_API_BASE || 'http://127.0.0.1:5005') + '/api';
 
 async function jsonFetch(path, options = {}) {
+  const { timeoutMs, ...fetchOptions } = options;
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
-  const resp = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const controller = timeoutMs ? new AbortController() : null;
+  const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  let resp;
+  try {
+    resp = await fetch(`${API_BASE}${path}`, {
+      ...fetchOptions,
+      headers,
+      signal: fetchOptions.signal || controller?.signal,
+    });
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      throw new Error('请求超时，请确认 REAPER 和 Bridge 正在响应后重试。');
+    }
+    throw e;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
   let body;
   try {
     body = await resp.json();
@@ -51,10 +68,10 @@ export const api = {
   rejectRequest: (id) => jsonFetch(`/p2p/reject/${id}`, { method: 'POST' }),
   notificationsUrl: `${API_BASE}/events`,
 
-  getReaperBridgeStatus: () => jsonFetch('/reaper/bridge/status'),
+  getReaperBridgeStatus: () => jsonFetch('/reaper/bridge/status', { timeoutMs: 12000 }),
   pingReaperBridge: () => jsonFetch('/reaper/bridge/ping', { method: 'POST' }),
   confirmReaperBridge: (payload = {}) =>
-    jsonFetch('/reaper/bridge/confirm', { method: 'POST', body: JSON.stringify(payload) }),
+    jsonFetch('/reaper/bridge/confirm', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 15000 }),
   openReaperBridgeScriptFolder: () => jsonFetch('/reaper/bridge/script-folder', { method: 'POST' }),
 
   getSettings: () => jsonFetch('/settings'),

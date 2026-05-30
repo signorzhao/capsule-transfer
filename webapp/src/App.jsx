@@ -87,6 +87,7 @@ function Shell() {
   const [showIncoming, setShowIncoming] = useState(false);
   const [bridgeStatus, setBridgeStatus] = useState(null);
   const [showSetupWizard, setShowSetupWizard] = useState(false);
+  const [isCheckingCaptureSetup, setIsCheckingCaptureSetup] = useState(false);
   const setupCheckedRef = useRef(false);
   const lastSetupStateRef = useRef('');
 
@@ -230,17 +231,23 @@ function Shell() {
   };
 
   const handleRequestCreateCapsule = async () => {
-    const status = await refreshBridgeStatus();
-    if (status?.setup_state !== 'READY') {
-      setShowSetupWizard(true);
-      toast.info(status?.setup_message || '请先完成 REAPER 设置。');
-      return false;
+    if (isCheckingCaptureSetup) return false;
+    setIsCheckingCaptureSetup(true);
+    try {
+      const status = await refreshBridgeStatus();
+      if (status?.setup_state !== 'READY') {
+        setShowSetupWizard(true);
+        toast.info(status?.setup_message || '请先完成 REAPER 设置。');
+        return false;
+      }
+      if (status?.selected_item_count !== null && status?.selected_item_count !== undefined && Number(status.selected_item_count) <= 0) {
+        toast.error('请先在 REAPER 中选中要保存为胶囊的 Item。');
+        return false;
+      }
+      return true;
+    } finally {
+      setIsCheckingCaptureSetup(false);
     }
-    if (status?.selected_item_count !== null && status?.selected_item_count !== undefined && Number(status.selected_item_count) <= 0) {
-      toast.error('请先在 REAPER 中选中要保存为胶囊的 Item。');
-      return false;
-    }
-    return true;
   };
 
   const handleStartTransferTo = (contact) => {
@@ -275,21 +282,25 @@ function Shell() {
   };
 
   const handleCreateCapsule = async (payload) => {
+    const initialSteps = captureStepsForPhase('', payload?.render_preview);
+    setCaptureStatus({ phase: 'saving', message: '正在检测 REAPER 设置...', steps: initialSteps });
     const preflight = await refreshBridgeStatus();
     if (preflight?.setup_state !== 'READY') {
+      setCaptureStatus(null);
       setShowSetupWizard(true);
       toast.error(preflight?.setup_message || '请先完成 REAPER 设置。');
-      return;
+      return false;
     }
     if (preflight?.selected_item_count !== null && preflight?.selected_item_count !== undefined && Number(preflight.selected_item_count) <= 0) {
+      setCaptureStatus(null);
       toast.error('请先在 REAPER 中选中要保存为胶囊的 Item。');
-      return;
+      return false;
     }
-    const initialSteps = captureStepsForPhase('', payload?.render_preview);
     setCaptureStatus({ phase: 'saving', message: '正在连接 REAPER Bridge...', steps: initialSteps });
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), payload?.render_preview ? 150000 : 60000);
     let phasePollId = null;
+    let phasePollInFlight = false;
     let renderHintTimeoutId = null;
     let captureActive = true;
     try {
@@ -311,6 +322,8 @@ function Shell() {
         }, 2500);
       }
       phasePollId = setInterval(async () => {
+        if (phasePollInFlight) return;
+        phasePollInFlight = true;
         try {
           const status = await api.getReaperBridgeStatus();
           if (!captureActive) return;
@@ -336,6 +349,8 @@ function Shell() {
           });
         } catch {
           // Keep the last visible phase if polling briefly fails.
+        } finally {
+          phasePollInFlight = false;
         }
       }, 800);
       const resp = await fetch(`${api.base}/capsules/webui-export`, {
@@ -557,7 +572,7 @@ function Shell() {
         </header>
 
         <main className="flex-1 overflow-y-auto p-6 custom-scrollbar">
-          {activeTab === 'library' && <LibraryView capsules={capsules} onSend={handleSelectCapsuleForSend} onDelete={handleDeleteCapsule} onCreate={handleCreateCapsule} onRequestCreate={handleRequestCreateCapsule} onRename={handleRenameCapsule} onOpenRpp={handleOpenRpp} onOpenFolder={handleOpenFolder} />}
+          {activeTab === 'library' && <LibraryView capsules={capsules} onSend={handleSelectCapsuleForSend} onDelete={handleDeleteCapsule} onCreate={handleCreateCapsule} onRequestCreate={handleRequestCreateCapsule} isCheckingSetup={isCheckingCaptureSetup} onRename={handleRenameCapsule} onOpenRpp={handleOpenRpp} onOpenFolder={handleOpenFolder} />}
           {activeTab === 'contacts' && <ContactsView contacts={contacts} onlineContacts={onlineContacts} onSend={handleStartTransferTo} onDelete={handleDeleteContact} onPing={handlePingContact} showAddForm={showAddContact} setShowAddForm={setShowAddContact} onAdd={handleAddContact} />}
           {activeTab === 'transfer' && <TransferView capsules={capsules} contacts={contacts} selectedCapsules={selectedCapsules} setSelectedCapsules={setSelectedCapsules} targetContacts={targetContacts} setTargetContacts={setTargetContacts} tempPeer={tempPeer} setTempPeer={setTempPeer} showTempPeerForm={showTempPeerForm} setShowTempPeerForm={setShowTempPeerForm} isSending={isSending} onSend={handleSend} />}
           {activeTab === 'settings' && <SettingsView networkInfo={networkInfo} apiBase={api.base} bridgeStatus={bridgeStatus} onRefreshBridge={refreshBridgeStatus} onOpenSetup={() => setShowSetupWizard(true)} />}
@@ -570,7 +585,7 @@ function Shell() {
   );
 }
 
-function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, onRename, onOpenRpp, onOpenFolder }) {
+function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, isCheckingSetup, onRename, onOpenRpp, onOpenFolder }) {
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [playingId, setPlayingId] = useState(null);
   const audioRef = useRef(null);
@@ -602,18 +617,21 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, on
       <div className="flex items-center justify-between mb-8">
         <div><h1 className="text-2xl font-bold text-white">我的胶囊</h1><p className="text-slate-500 text-sm mt-1">本地已捕获 / 接收的胶囊（共 {capsules.length} 个）</p></div>
         <div className="flex items-center space-x-2">
-          <button onClick={async () => {
+          <button disabled={isCheckingSetup} onClick={async () => {
             if (showCreateForm) {
               setShowCreateForm(false);
               return;
             }
             const allowed = await onRequestCreate();
             if (allowed) setShowCreateForm(true);
-          }} className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg flex items-center space-x-2 shadow-lg shadow-indigo-600/20"><Plus size={18} /><span>新捕获</span></button>
+          }} className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg flex items-center space-x-2 shadow-lg shadow-indigo-600/20 disabled:opacity-50 disabled:cursor-not-allowed">
+            {isCheckingSetup ? <RefreshCw size={18} className="animate-spin" /> : <Plus size={18} />}
+            <span>{isCheckingSetup ? '检测中...' : '新捕获'}</span>
+          </button>
         </div>
       </div>
 
-      {showCreateForm && <CreateCapsuleForm onCancel={() => setShowCreateForm(false)} onSubmit={async (data) => { await onCreate(data); setShowCreateForm(false); }} />}
+      {showCreateForm && <CreateCapsuleForm onCancel={() => setShowCreateForm(false)} onSubmit={async (data) => { const result = await onCreate(data); if (result !== false) setShowCreateForm(false); }} />}
       {capsules.length === 0 && !showCreateForm ? (
         <div className="border-2 border-dashed border-slate-800 rounded-2xl flex flex-col items-center justify-center p-16 text-slate-500"><Package size={32} className="mb-3" /><p className="text-sm">暂无胶囊。可点右上角“新捕获”从 REAPER 捕获。</p></div>
       ) : (
@@ -800,6 +818,7 @@ function SettingsView({ networkInfo, apiBase, bridgeStatus, onRefreshBridge, onO
 function SetupWizard({ status, onClose, onRefresh }) {
   const [current, setCurrent] = useState(status);
   const [checking, setChecking] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [port, setPort] = useState(String(status?.webui_port || 9000));
   const toast = useToast();
 
@@ -840,6 +859,8 @@ function SetupWizard({ status, onClose, onRefresh }) {
   };
 
   const confirmCurrentReaper = async () => {
+    if (confirming) return;
+    setConfirming(true);
     try {
       const r = await api.confirmReaperBridge({ webui_port: Number(port) || 9000 });
       setCurrent(r.data);
@@ -848,6 +869,8 @@ function SetupWizard({ status, onClose, onRefresh }) {
       onClose();
     } catch (e) {
       toast.error(`保存失败：${e.message}`);
+    } finally {
+      setConfirming(false);
     }
   };
 
@@ -929,8 +952,11 @@ function SetupWizard({ status, onClose, onRefresh }) {
                 <Row k="已保存资源目录" v={current?.confirmed_reaper_resource_path} />
               </div>
               <div className="flex flex-wrap items-center justify-end gap-3">
-                <button onClick={refresh} disabled={checking} className="px-4 py-2 text-sm bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg disabled:opacity-40">{checking ? '检测中...' : '重新检测'}</button>
-                <button onClick={confirmCurrentReaper} disabled={!canConfirm} className="px-5 py-2 text-sm bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg disabled:opacity-40">确认并保存设置</button>
+                <button onClick={refresh} disabled={checking || confirming} className="px-4 py-2 text-sm bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg disabled:opacity-40">{checking ? '检测中...' : '重新检测'}</button>
+                <button onClick={confirmCurrentReaper} disabled={!canConfirm || confirming || checking} className="px-5 py-2 text-sm bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg disabled:opacity-40 flex items-center gap-2">
+                  {confirming && <RefreshCw size={14} className="animate-spin" />}
+                  <span>{confirming ? '正在保存...' : '确认并保存设置'}</span>
+                </button>
               </div>
             </div>
           )}

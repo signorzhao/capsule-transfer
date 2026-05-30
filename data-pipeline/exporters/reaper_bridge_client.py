@@ -131,15 +131,16 @@ class ReaperBridgeClient:
         if not resp.ok:
             raise ReaperBridgeError(f"写入 REAPER EXTSTATE 失败: HTTP {resp.status_code}")
 
-    def get_extstate(self, key: str, timeout: Optional[float] = None) -> str:
+    def get_extstate(self, key: str, timeout: Optional[float] = None, attempts: int = 3) -> str:
         last_exc = None
-        for attempt in range(3):
+        total_attempts = max(1, attempts)
+        for attempt in range(total_attempts):
             try:
                 resp = self._reaper_api(self._get_extstate_command(SECTION, key), timeout=timeout)
                 break
             except Exception as exc:
                 last_exc = exc
-                if attempt == 2:
+                if attempt == total_attempts - 1:
                     raise
                 time.sleep(0.15)
         else:
@@ -158,22 +159,25 @@ class ReaperBridgeClient:
         if not self.test_webui():
             return BridgeStatus(False, False, error="无法连接 REAPER Web Interface，请确认 REAPER 已打开并启用 Web Interface。")
         try:
-            v2_version = self.get_extstate("bridge_version_v2")
-            v2_heartbeat = self.get_extstate("heartbeat_v2")
-            version = v2_version or self.get_extstate("bridge_version")
-            state = self.get_extstate("status") or "unknown"
-            phase = self.get_extstate("export_phase")
-            last_result = self.get_extstate("last_result_debug")
-            heartbeat = v2_heartbeat or self.get_extstate("heartbeat")
-            bridge_exe_path = self.get_extstate("bridge_exe_path")
-            bridge_app_version = self.get_extstate("bridge_app_version")
-            bridge_resource_path = self.get_extstate("bridge_resource_path")
-            bridge_project_path = self.get_extstate("bridge_project_path")
-            bridge_instance_id = self.get_extstate("bridge_instance_id")
-            bridge_instance_conflict = self.get_extstate("bridge_instance_conflict")
+            def read(key: str) -> str:
+                return self.get_extstate(key, attempts=1)
+
+            v2_version = read("bridge_version_v2")
+            v2_heartbeat = read("heartbeat_v2")
+            version = v2_version or read("bridge_version")
+            state = read("status") or "unknown"
+            phase = read("export_phase")
+            last_result = read("last_result_debug")
+            heartbeat = v2_heartbeat or read("heartbeat")
+            bridge_exe_path = read("bridge_exe_path")
+            bridge_app_version = read("bridge_app_version")
+            bridge_resource_path = read("bridge_resource_path")
+            bridge_project_path = read("bridge_project_path")
+            bridge_instance_id = read("bridge_instance_id")
+            bridge_instance_conflict = read("bridge_instance_conflict")
             selected_item_count = None
             try:
-                selected_item_count = int(self.get_extstate("selected_item_count") or "0")
+                selected_item_count = int(read("selected_item_count") or "0")
             except (TypeError, ValueError):
                 selected_item_count = None
             bridge_protocol = 2 if v2_version and v2_heartbeat else 1

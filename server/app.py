@@ -863,18 +863,19 @@ def _reaper_setup_state(status: dict, desired_bridge_version: str, cfg: dict) ->
     return "READY", "REAPER 设置已确认，可以捕获胶囊。"
 
 
-def _build_reaper_bridge_status(webui_port: int | None = None) -> dict:
+def _build_reaper_bridge_status(webui_port: int | None = None, include_diagnostics: bool = False) -> dict:
     cfg = load_config()
     port = int(webui_port or cfg.get("webui_port", 9000))
     diagnostics = {}
     try:
         from exporters.reaper_bridge_client import ReaperBridgeClient
-        client = ReaperBridgeClient(port=port)
+        client = ReaperBridgeClient(port=port, timeout=3.0 if include_diagnostics else 1.0)
         status = client.status().as_dict()
-        try:
-            diagnostics = json.loads(client._diagnostics())
-        except Exception:
-            diagnostics = {}
+        if include_diagnostics:
+            try:
+                diagnostics = json.loads(client._diagnostics())
+            except Exception:
+                diagnostics = {}
     except Exception as exc:
         status = {"webui_available": False, "bridge_available": False, "error": str(exc)}
 
@@ -1091,7 +1092,8 @@ def webui_export():
 
 def reaper_bridge_status():
     webui_port = int(request.args.get("webui_port") or load_config().get("webui_port", 9000))
-    status = _build_reaper_bridge_status(webui_port)
+    include_diagnostics = request.args.get("diagnostics") in {"1", "true", "yes"}
+    status = _build_reaper_bridge_status(webui_port, include_diagnostics=include_diagnostics)
     cfg = load_config()
     cfg["reaper_setup_state"] = status.get("setup_state", "")
     save_config(cfg)
