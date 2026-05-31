@@ -30,6 +30,7 @@ import {
   ShieldOff,
   ShieldCheck,
   Bell,
+  Download,
 } from 'lucide-react';
 
 import NavIcon from './components/NavIcon.jsx';
@@ -1353,6 +1354,10 @@ function TransferView({ capsules, contacts, selectedCapsules, setSelectedCapsule
 
 function SettingsView({ networkInfo, apiBase, bridgeStatus, onRefreshBridge, onOpenSetup }) {
   const [checkingBridge, setCheckingBridge] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updatePhase, setUpdatePhase] = useState('');
+  const toast = useToast();
 
   useEffect(() => {
     onRefreshBridge();
@@ -1372,9 +1377,96 @@ function SettingsView({ networkInfo, apiBase, bridgeStatus, onRefreshBridge, onO
     ? `已确认 v${bridgeStatus.bridge_version || ''}`
     : bridgeStatus?.setup_message || 'REAPER 设置未完成';
 
+  const checkForUpdate = async () => {
+    setUpdateBusy(true);
+    setUpdatePhase('checking');
+    try {
+      const info = await api.checkUpdate();
+      setUpdateInfo(info);
+      if (!info.enabled) {
+        toast.info(info.message);
+      } else if (info.update_available) {
+        toast.success(`发现新版本 ${info.latest_version}`);
+      } else {
+        toast.success(info.message || '当前已是最新版本');
+      }
+    } catch (e) {
+      toast.error(`检查更新失败：${e.message}`);
+    } finally {
+      setUpdateBusy(false);
+      setUpdatePhase('');
+    }
+  };
+
+  const installUpdate = async () => {
+    if (!updateInfo?.package_url || !updateInfo?.sha256 || !updateInfo?.latest_version || !updateInfo?.latest_build) return;
+    setUpdateBusy(true);
+    try {
+      setUpdatePhase('copying');
+      const downloaded = await api.downloadUpdate({
+        packageUrl: updateInfo.package_url,
+        sha256: updateInfo.sha256,
+        version: updateInfo.latest_version,
+        build: updateInfo.latest_build,
+      });
+      setUpdatePhase('installing');
+      toast.info('即将关闭并安装更新。');
+      await api.installUpdate({
+        packagePath: downloaded.package_path,
+        version: downloaded.version,
+        build: downloaded.build,
+      });
+    } catch (e) {
+      toast.error(`安装更新失败：${e.message}`);
+      setUpdateBusy(false);
+      setUpdatePhase('');
+    }
+  };
+
+  const updateButtonLabel = updatePhase === 'checking'
+    ? '检查中...'
+    : updatePhase === 'copying'
+      ? '正在复制更新包...'
+      : updatePhase === 'installing'
+        ? '正在安装...'
+        : '检查更新';
+
   return (
     <div className="max-w-2xl mx-auto">
       <h1 className="text-2xl font-bold text-white mb-6">设置 / 信息</h1>
+      <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 mb-6">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <h3 className="text-sm font-bold text-slate-200">软件更新</h3>
+            <p className="text-xs text-slate-500 mt-1">
+              {updateInfo ? `当前版本 ${updateInfo.current_version} · ${updateInfo.message}` : '手动检查内部更新源。'}
+            </p>
+          </div>
+          <button onClick={checkForUpdate} disabled={updateBusy} className="px-3 py-2 text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg disabled:opacity-40 shrink-0 flex items-center space-x-2">
+            <RefreshCw size={14} className={updateBusy ? 'animate-spin' : ''} />
+            <span>{updateButtonLabel}</span>
+          </button>
+        </div>
+        {updateInfo?.update_available && (
+          <div className="mt-4 rounded-xl border border-indigo-500/25 bg-indigo-500/10 p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="text-sm font-bold text-indigo-200">可更新到 {updateInfo.latest_version}</div>
+                <div className="text-xs text-slate-400 mt-1">包体大小：{formatBytes(updateInfo.size || 0)}</div>
+                {updateInfo.notes?.length > 0 && (
+                  <ul className="mt-3 space-y-1 text-xs text-slate-300 list-disc list-inside">
+                    {updateInfo.notes.slice(0, 4).map((note, idx) => <li key={`${note}-${idx}`}>{note}</li>)}
+                  </ul>
+                )}
+              </div>
+              <button onClick={installUpdate} disabled={updateBusy} className="px-4 py-2 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg disabled:opacity-40 shrink-0 flex items-center space-x-2">
+                <Download size={14} />
+                <span>立即更新</span>
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
       <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 mb-6">
         <h3 className="text-sm font-bold text-slate-200 mb-4">REAPER 设置</h3>
         <div className={`rounded-xl border p-4 mb-4 ${bridgeOk ? 'bg-emerald-500/10 border-emerald-500/25' : 'bg-amber-500/10 border-amber-500/25'}`}>

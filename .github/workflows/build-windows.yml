@@ -35,7 +35,9 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: |
+            src-tauri
+            tools/capsule-updater
 
       - name: Install frontend dependencies
         working-directory: webapp
@@ -44,6 +46,9 @@ jobs:
       - name: Build frontend
         working-directory: webapp
         run: npm run build
+
+      - name: Build updater
+        run: cargo build --release --manifest-path tools/capsule-updater/Cargo.toml
 
       - name: Install Python dependencies & build sidecar
         run: |
@@ -58,6 +63,15 @@ jobs:
 
       - name: Assemble portable package
         run: |
+          $version = "0.7.0"
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $version = "${{ github.ref_name }}".TrimStart("v")
+          }
+          $parts = $version.Split(".")
+          $major = if ($parts.Length -gt 0) { [int]$parts[0] } else { 0 }
+          $minor = if ($parts.Length -gt 1) { [int]$parts[1] } else { 0 }
+          $patch = if ($parts.Length -gt 2) { [int]$parts[2] } else { 0 }
+          $build = $major * 10000 + $minor * 100 + $patch
           $packageDir = "Capsule LAN"
           New-Item -ItemType Directory -Force $packageDir
           # Tauri 编译产物
@@ -69,10 +83,24 @@ jobs:
           Copy-Item $appExe "$packageDir/Capsule LAN.exe"
           # Flask 后端 sidecar
           Copy-Item dist/flask-backend.exe "$packageDir/"
+          # 自更新器
+          $updaterExe = @(
+            "tools/capsule-updater/target/release/capsule-updater.exe",
+            "target/release/capsule-updater.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $updaterExe) { throw "Cannot find built capsule-updater executable." }
+          Copy-Item $updaterExe "$packageDir/"
           # data-pipeline
           Copy-Item -Recurse data-pipeline "$packageDir/data-pipeline"
           # 前端（Flask 需要）
           Copy-Item -Recurse webapp/dist "$packageDir/webapp"
+          # 版本与更新配置
+          @{
+            version = $version
+            build = $build
+            channel = "stable"
+          } | ConvertTo-Json | Set-Content -Encoding UTF8 "$packageDir/version.json"
+          Copy-Item update-config.json "$packageDir/update-config.json"
           # 创建数据目录
           New-Item -ItemType Directory -Force "$packageDir/data/capsules"
 
@@ -85,11 +113,45 @@ jobs:
       - name: Create ZIP for Release
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          Compress-Archive -Path "Capsule LAN" -DestinationPath Capsule-LAN-Windows-Portable.zip
+          $tag = "${{ github.ref_name }}"
+          Compress-Archive -Path "Capsule LAN" -DestinationPath "Capsule-LAN-$tag-windows-x64-portable.zip"
+
+      - name: Create update manifest
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $zip = "Capsule-LAN-$tag-windows-x64-portable.zip"
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  $zip" | Set-Content -Encoding ASCII "$zip.sha256"
+          $parts = $version.Split(".")
+          $major = if ($parts.Length -gt 0) { [int]$parts[0] } else { 0 }
+          $minor = if ($parts.Length -gt 1) { [int]$parts[1] } else { 0 }
+          $patch = if ($parts.Length -gt 2) { [int]$parts[2] } else { 0 }
+          $build = $major * 10000 + $minor * 100 + $patch
+          $size = (Get-Item $zip).Length
+          @{
+            app = "Capsule LAN"
+            channel = "stable"
+            version = $version
+            build = $build
+            pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            notes = @("请查看本版本发布说明。")
+            platforms = @{
+              "windows-x64-portable" = @{
+                url = $zip
+                sha256 = $hash
+                size = $size
+              }
+            }
+          } | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 latest.json
 
       - name: Create Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: Capsule-LAN-Windows-Portable.zip
+          files: |
+            Capsule-LAN-${{ github.ref_name }}-windows-x64-portable.zip
+            Capsule-LAN-${{ github.ref_name }}-windows-x64-portable.zip.sha256
+            latest.json
           generate_release_notes: true
