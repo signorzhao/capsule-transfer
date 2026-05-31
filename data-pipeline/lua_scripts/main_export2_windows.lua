@@ -108,6 +108,138 @@ local function QuoteWindowsArg(value)
     return '"' .. tostring(value or ""):gsub('"', '""') .. '"'
 end
 
+local function QuotePowerShellString(value)
+    return "'" .. tostring(value or ""):gsub("'", "''") .. "'"
+end
+
+local function RunPowerShellScript(script, helperDir, timeoutMs)
+    if not IsWindows() then
+        return nil
+    end
+    helperDir = helperDir or GetCurrentScriptDir()
+    if not helperDir or helperDir == "" then
+        return nil
+    end
+    MakeDir(helperDir)
+    local helperPath = JoinPath(helperDir, "_capsule_window_state_" .. tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999)) .. ".ps1")
+    local f = io.open(helperPath, "w")
+    if not f then
+        return nil
+    end
+    f:write(script)
+    f:close()
+
+    local command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " .. QuoteWindowsArg(helperPath)
+    local result = RunCommandHidden(command, timeoutMs or 10000)
+    os.remove(helperPath)
+    return result
+end
+
+local function WindowsPlacementPrelude()
+    return [[
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public struct POINT { public int X; public int Y; }
+public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+public struct WINDOWPLACEMENT {
+  public int length;
+  public int flags;
+  public int showCmd;
+  public POINT ptMinPosition;
+  public POINT ptMaxPosition;
+  public RECT rcNormalPosition;
+}
+public class CapsuleWinPlacement {
+  [DllImport("user32.dll")] public static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
+  [DllImport("user32.dll")] public static extern bool SetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+}
+"@
+]]
+end
+
+local function ReaperProcessSelectorScript()
+    local exePath = ""
+    if reaper.GetExePath then
+        local ok, result = pcall(reaper.GetExePath)
+        if ok and result then
+            exePath = tostring(result)
+        end
+    end
+    return string.format([[
+$target = %s
+$candidates = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 -and $_.ProcessName -match '^reaper' }
+$proc = $null
+foreach ($p in $candidates) {
+  $path = ''
+  try { $path = $p.MainModule.FileName } catch { $path = '' }
+  if ($target -and $path -and (($path -ieq $target) -or ((Split-Path $path -Parent) -ieq $target))) {
+    $proc = $p
+    break
+  }
+}
+if (-not $proc) { $proc = $candidates | Select-Object -First 1 }
+if (-not $proc) { exit 2 }
+]], QuotePowerShellString(exePath))
+end
+
+local function CaptureReaperWindowPlacement(helperDir)
+    if not IsWindows() then
+        return nil
+    end
+    local script = WindowsPlacementPrelude() .. ReaperProcessSelectorScript() .. [[
+$wp = New-Object WINDOWPLACEMENT
+$wp.length = [Runtime.InteropServices.Marshal]::SizeOf($wp)
+[CapsuleWinPlacement]::GetWindowPlacement($proc.MainWindowHandle, [ref]$wp) | Out-Null
+Write-Output ("CAPSULE_WINDOW_STATE=" + $wp.showCmd + "|" + $wp.rcNormalPosition.Left + "|" + $wp.rcNormalPosition.Top + "|" + $wp.rcNormalPosition.Right + "|" + $wp.rcNormalPosition.Bottom)
+]]
+    local result = RunPowerShellScript(script, helperDir, 10000)
+    local payload = tostring(result or ""):match("CAPSULE_WINDOW_STATE=([^\r\n]+)")
+    if not payload then
+        return nil
+    end
+    local showCmd, left, top, right, bottom = payload:match("^(%-?%d+)|(%-?%d+)|(%-?%d+)|(%-?%d+)|(%-?%d+)$")
+    if not showCmd then
+        return nil
+    end
+    return {
+        show_cmd = tonumber(showCmd),
+        left = tonumber(left),
+        top = tonumber(top),
+        right = tonumber(right),
+        bottom = tonumber(bottom),
+    }
+end
+
+local function RestoreReaperWindowPlacement(state, helperDir)
+    if not IsWindows() or not state or not state.show_cmd then
+        return false
+    end
+    -- Only restore visible normal/maximized states. Avoid minimizing REAPER after capture.
+    local showCmd = tonumber(state.show_cmd) or 1
+    if showCmd == 2 then
+        showCmd = 1
+    end
+    local script = WindowsPlacementPrelude() .. ReaperProcessSelectorScript() .. string.format([[
+$wp = New-Object WINDOWPLACEMENT
+$wp.length = [Runtime.InteropServices.Marshal]::SizeOf($wp)
+$wp.flags = 0
+$wp.showCmd = %d
+$wp.ptMinPosition = New-Object POINT
+$wp.ptMaxPosition = New-Object POINT
+$wp.rcNormalPosition = New-Object RECT
+$wp.rcNormalPosition.Left = %d
+$wp.rcNormalPosition.Top = %d
+$wp.rcNormalPosition.Right = %d
+$wp.rcNormalPosition.Bottom = %d
+[CapsuleWinPlacement]::SetWindowPlacement($proc.MainWindowHandle, [ref]$wp) | Out-Null
+if (%d -eq 3) { [CapsuleWinPlacement]::ShowWindowAsync($proc.MainWindowHandle, 3) | Out-Null }
+]], showCmd, state.left or 0, state.top or 0, state.right or 0, state.bottom or 0, showCmd)
+    RunPowerShellScript(script, helperDir, 10000)
+    return true
+end
+
 local function WriteTempWindowsRenderHelper(helperDir)
     if not helperDir or helperDir == "" then
         return nil
@@ -3154,6 +3286,7 @@ function ExportCapsule()
         reaper.ShowConsoleMsg("\n=== 渲染预览音频（进程内临时标签页）===\n")
 
         local origProj = reaper.EnumProjects(-1)
+        local windowPlacement = CaptureReaperWindowPlacement(outputDir)
         local openedRenderTab = false
         local rewriteOk = RewriteRppRenderOutputToCurrentDir(rppPath, capsuleName)
         local ok, renderErr = pcall(function()
@@ -3176,8 +3309,9 @@ function ExportCapsule()
                 end
             end
         end
+        local windowRestoreOk = RestoreReaperWindowPlacement(windowPlacement, outputDir)
 
-        reaper.SetExtState("capsule_transfer", "preview_render_debug", "mode=current-instance-tab; rpp=" .. tostring(rppPath) .. "; output_dir=" .. tostring(outputDir) .. "; rewrite_ok=" .. tostring(rewriteOk) .. "; ok=" .. tostring(ok) .. "; error=" .. tostring(renderErr or ""), false)
+        reaper.SetExtState("capsule_transfer", "preview_render_debug", "mode=current-instance-tab; rpp=" .. tostring(rppPath) .. "; output_dir=" .. tostring(outputDir) .. "; rewrite_ok=" .. tostring(rewriteOk) .. "; window_state_captured=" .. tostring(windowPlacement ~= nil) .. "; window_state_restored=" .. tostring(windowRestoreOk) .. "; ok=" .. tostring(ok) .. "; error=" .. tostring(renderErr or ""), false)
         if ok then
             reaper.ShowConsoleMsg("✓ 预览渲染已在当前实例完成\n")
             BridgePhase("rendering preview: finished")
