@@ -29,11 +29,9 @@ function normalizeNetworkInfo(payload) {
 
   const ip = info.ip || info.local_ip || info.host_ip || '';
   const port = Number(info.port || info.local_port || 5005);
+  const detectedLan = isPrivateLanHost(ip) || isPrivateLanHost(urlHost);
   const allowedForLanMode = Boolean(
-    info.allowed_for_lan_mode ??
-    info.is_private_lan ??
-    isPrivateLanHost(ip) ||
-    isPrivateLanHost(urlHost)
+    info.allowed_for_lan_mode ?? info.is_private_lan ?? detectedLan
   );
 
   return {
