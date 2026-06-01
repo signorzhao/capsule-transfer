@@ -24,6 +24,7 @@ BRIDGE_TIMEOUT_SECONDS = 45
 PREVIEW_BRIDGE_TIMEOUT_SECONDS = 120
 POLL_INTERVAL_SECONDS = 0.2
 HEARTBEAT_STALE_SECONDS = 10
+COMMON_WEBUI_PORTS = (9000, 8080, 8081, 8082, 8888, 8000)
 
 
 class ReaperBridgeError(RuntimeError):
@@ -73,6 +74,8 @@ class BridgeStatus:
     selected_item_count: Optional[int] = None
     bridge_instance_id: str = ""
     bridge_instance_conflict: str = ""
+    detected_webui_port: Optional[int] = None
+    scanned_webui_ports: Optional[list[int]] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -93,6 +96,8 @@ class BridgeStatus:
             "selected_item_count": self.selected_item_count,
             "bridge_instance_id": self.bridge_instance_id,
             "bridge_instance_conflict": self.bridge_instance_conflict,
+            "detected_webui_port": self.detected_webui_port,
+            "scanned_webui_ports": self.scanned_webui_ports or [],
         }
 
 
@@ -102,6 +107,11 @@ class ReaperBridgeClient:
         self.port = port
         self.timeout = timeout
         self.base_url = f"http://{host}:{port}"
+        self._scanned_ports: list[int] = []
+
+    def _set_port(self, port: int) -> None:
+        self.port = int(port)
+        self.base_url = f"http://{self.host}:{self.port}"
 
     def _get(self, path: str, timeout: Optional[float] = None) -> requests.Response:
         resp = requests.get(f"{self.base_url}{path}", timeout=timeout or self.timeout)
@@ -120,11 +130,34 @@ class ReaperBridgeClient:
     def _get_extstate_command(section: str, key: str) -> str:
         return f"GET/EXTSTATE/{quote(section, safe='')}/{quote(key, safe='')}"
 
-    def test_webui(self) -> bool:
+    def _test_webui_on_current_port(self) -> bool:
         try:
             return self._get("/", timeout=self.timeout).ok
         except Exception:
             return False
+
+    def test_webui(self) -> bool:
+        """Test REAPER WebUI and auto-detect common local ports.
+
+        Older builds assumed port 9000, while REAPER Web browser interface is often
+        configured as 8080. If the configured port fails, scan a small local-only
+        candidate list and switch the client to the first responsive port.
+        """
+        candidates: list[int] = []
+        for port in (self.port, *COMMON_WEBUI_PORTS):
+            port = int(port)
+            if port not in candidates:
+                candidates.append(port)
+
+        self._scanned_ports = candidates
+        original_port = self.port
+        for port in candidates:
+            self._set_port(port)
+            if self._test_webui_on_current_port():
+                return True
+
+        self._set_port(original_port)
+        return False
 
     def set_extstate(self, key: str, value: str) -> None:
         resp = self._reaper_api(self._set_extstate_command(SECTION, key, value))
@@ -157,7 +190,14 @@ class ReaperBridgeClient:
 
     def status(self) -> BridgeStatus:
         if not self.test_webui():
-            return BridgeStatus(False, False, error="无法连接 REAPER Web Interface，请确认 REAPER 已打开并启用 Web Interface。")
+            ports = ", ".join(str(port) for port in self._scanned_ports) or str(self.port)
+            return BridgeStatus(
+                False,
+                False,
+                error=f"无法连接 REAPER Web Interface。已尝试端口：{ports}。请确认 REAPER 已打开并启用 Web browser interface。",
+                scanned_webui_ports=self._scanned_ports,
+            )
+        detected_port = self.port
         try:
             def read(key: str) -> str:
                 return self.get_extstate(key, attempts=1)
@@ -218,9 +258,17 @@ class ReaperBridgeClient:
                 selected_item_count=selected_item_count,
                 bridge_instance_id=bridge_instance_id,
                 bridge_instance_conflict=bridge_instance_conflict,
+                detected_webui_port=detected_port,
+                scanned_webui_ports=self._scanned_ports,
             )
         except Exception as exc:
-            return BridgeStatus(True, False, error=f"Bridge 状态读取失败: {exc}")
+            return BridgeStatus(
+                True,
+                False,
+                error=f"Bridge 状态读取失败: {exc}",
+                detected_webui_port=detected_port,
+                scanned_webui_ports=self._scanned_ports,
+            )
 
     @staticmethod
     def _transport_keys(status: BridgeStatus) -> tuple[str, str]:
@@ -314,6 +362,8 @@ class ReaperBridgeClient:
             if value and len(value) > 600:
                 value = value[:600] + "..."
             fields[key] = value
+        fields["detected_webui_port"] = self.port
+        fields["scanned_webui_ports"] = self._scanned_ports
         return json.dumps(fields, ensure_ascii=False)
 
     def _wait_for_result(self, request_id: str, timeout: int, result_key: str = "result") -> Dict[str, Any]:
