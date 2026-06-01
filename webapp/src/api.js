@@ -1,5 +1,51 @@
 const API_BASE = (import.meta.env.VITE_API_BASE || 'http://127.0.0.1:5005') + '/api';
 
+function isPrivateLanHost(value) {
+  if (!value) return false;
+  const host = String(value).trim().toLowerCase();
+
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+  if (host.startsWith('10.')) return true;
+  if (host.startsWith('192.168.')) return true;
+
+  const match = host.match(/^172\.(\d+)\./);
+  if (match) {
+    const n = Number(match[1]);
+    return n >= 16 && n <= 31;
+  }
+
+  return false;
+}
+
+function normalizeNetworkInfo(payload) {
+  const info = payload?.data || payload || {};
+  const urlHost = (() => {
+    try {
+      return new URL(API_BASE).hostname;
+    } catch {
+      return '';
+    }
+  })();
+
+  const ip = info.ip || info.local_ip || info.host_ip || '';
+  const port = Number(info.port || info.local_port || 5005);
+  const detectedLan = isPrivateLanHost(ip) || isPrivateLanHost(urlHost);
+  const allowedForLanMode = Boolean(
+    info.allowed_for_lan_mode ?? info.is_private_lan ?? detectedLan
+  );
+
+  return {
+    ...info,
+    ip,
+    port,
+    hostname: info.hostname || info.host || '',
+    peer_id: info.peer_id || info.peerId || info.peer?.id || '',
+    peer_fingerprint: info.peer_fingerprint || info.peerFingerprint || info.peer?.fingerprint || '',
+    is_private_lan: Boolean(info.is_private_lan ?? allowedForLanMode),
+    allowed_for_lan_mode: allowedForLanMode,
+  };
+}
+
 async function tauriInvoke(command, args = {}) {
   if (!window.__TAURI_INTERNALS__) {
     throw new Error('自动更新仅在桌面版中可用。');
@@ -47,7 +93,10 @@ async function jsonFetch(path, options = {}) {
 export const api = {
   base: API_BASE,
   health: () => jsonFetch('/health'),
-  network: () => jsonFetch('/network/info'),
+  network: async () => {
+    const body = await jsonFetch('/network/info');
+    return { ...body, data: normalizeNetworkInfo(body) };
+  },
 
   listCapsules: (q) =>
     jsonFetch(`/capsules${q ? `?q=${encodeURIComponent(q)}` : ''}`),
