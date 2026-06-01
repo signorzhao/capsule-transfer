@@ -203,10 +203,11 @@ function Shell() {
       const status = await refreshBridgeStatus();
       if (!alive) return;
       const state = status?.setup_state || '';
+      const captureBusy = captureStatus && !['done', 'error'].includes(captureStatus.phase);
       if (!setupCheckedRef.current) {
         setupCheckedRef.current = true;
-        if (state && state !== 'READY') setShowSetupWizard(true);
-      } else if (lastSetupStateRef.current === 'READY' && state && state !== 'READY') {
+        if (!captureBusy && state && state !== 'READY') setShowSetupWizard(true);
+      } else if (!captureBusy && lastSetupStateRef.current === 'READY' && state && state !== 'READY') {
         setShowSetupWizard(true);
       }
       lastSetupStateRef.current = state;
@@ -217,7 +218,7 @@ function Shell() {
       alive = false;
       clearInterval(t);
     };
-  }, [refreshBridgeStatus]);
+  }, [refreshBridgeStatus, captureStatus]);
 
   useEffect(() => {
     const es = new EventSource(api.notificationsUrl);

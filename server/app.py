@@ -46,12 +46,14 @@ else:
 
 DATA_DIR = APP_DIR / "data"
 CAPSULES_DIR = DATA_DIR / "capsules"
+LOG_DIR = DATA_DIR / "logs"
 CONTACTS_FILE = DATA_DIR / "contacts.json"
 CAPSULE_FOLDERS_FILE = DATA_DIR / "capsule_folders.json"
 IDENTITY_FILE = DATA_DIR / "peer_identity.json"
 CONFIG_FILE = APP_DIR / "config.json"
 
 CAPSULES_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 os.environ["CAPSULE_TRANSFER_EXPORT_DIR"] = str(CAPSULES_DIR)
 os.environ["SYNESTH_CAPSULE_OUTPUT"] = str(CAPSULES_DIR)
 
@@ -75,6 +77,10 @@ if _DATA_PIPELINE.exists():
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(LOG_DIR / "capsule-transfer.log", encoding="utf-8"),
+    ],
 )
 logger = logging.getLogger("lan-capsule")
 
@@ -407,6 +413,7 @@ def _windows_raise_window(titles: list[str] | None = None, process_names: list[s
         "public class CapsuleWinFocus {\n"
         "  [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);\n"
         "  [DllImport(\"user32.dll\")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);\n"
+        "  [DllImport(\"user32.dll\")] public static extern bool IsIconic(IntPtr hWnd);\n"
         "}\n"
         "\"@; "
         "$wshell = New-Object -ComObject WScript.Shell; "
@@ -419,7 +426,9 @@ def _windows_raise_window(titles: list[str] | None = None, process_names: list[s
         "$titleMatch = $false; "
         "foreach ($title in $titles) { if ($p.MainWindowTitle -like \"*$title*\") { $titleMatch = $true; break } } "
         "if ($nameMatch -or $titleMatch) { "
-        "[CapsuleWinFocus]::ShowWindowAsync($p.MainWindowHandle, 9) | Out-Null; "
+        "if ([CapsuleWinFocus]::IsIconic($p.MainWindowHandle)) { "
+        "  [CapsuleWinFocus]::ShowWindowAsync($p.MainWindowHandle, 9) | Out-Null "
+        "} "
         "[CapsuleWinFocus]::SetForegroundWindow($p.MainWindowHandle) | Out-Null; "
         "$wshell.AppActivate($p.Id) | Out-Null; "
         "exit 0 "
@@ -1449,6 +1458,17 @@ def _build_reaper_bridge_status(webui_port: int | None = None, include_diagnosti
     desired_bridge_version = _desired_bridge_version()
     status.update(diagnostics)
     state, message = _reaper_setup_state(status, desired_bridge_version, cfg)
+    if state != "READY":
+        logger.info(
+            "REAPER setup state: state=%s webui=%s bridge=%s status=%s phase=%s heartbeat_age=%s error=%s",
+            state,
+            status.get("webui_available"),
+            status.get("bridge_available"),
+            status.get("status"),
+            status.get("export_phase"),
+            status.get("heartbeat_age_seconds"),
+            status.get("error"),
+        )
     status.update({
         "app_dir": str(APP_DIR),
         "data_dir": str(DATA_DIR),
@@ -1499,6 +1519,14 @@ def webui_export():
     logger.info("Reaper bridge export: type=%s preview=%s dir=%s", capsule_type, render_preview, export_dir)
 
     preflight = _build_reaper_bridge_status(webui_port)
+    logger.info(
+        "Reaper bridge preflight: state=%s selected=%s phase=%s bridge_status=%s heartbeat_age=%s",
+        preflight.get("setup_state"),
+        preflight.get("selected_item_count"),
+        preflight.get("export_phase"),
+        preflight.get("status"),
+        preflight.get("heartbeat_age_seconds"),
+    )
     if preflight.get("setup_state") != "READY":
         return jsonify({
             "success": False,
@@ -1530,6 +1558,7 @@ def webui_export():
         return _err("已有 Reaper 捕获在进行中，请等待完成后再试", 429)
 
     try:
+        started_at = time.time()
         result = quick_webui_export(
             project_name=capsule_type,
             theme_name=capsule_type,
@@ -1538,6 +1567,16 @@ def webui_export():
             capsule_type=capsule_type,
             export_dir=export_dir,
             username=data.get("username", "user"),
+        )
+        logger.info(
+            "Reaper bridge export result: elapsed=%.2fs success=%s capsule=%s preview_requested=%s preview_rendered=%s preview_audio=%s note=%s",
+            time.time() - started_at,
+            result.get("success"),
+            result.get("capsule_name"),
+            result.get("preview_requested"),
+            result.get("preview_rendered"),
+            result.get("preview_audio"),
+            result.get("preview_note"),
         )
     finally:
         _REAPER_CAPTURE_LOCK.release()

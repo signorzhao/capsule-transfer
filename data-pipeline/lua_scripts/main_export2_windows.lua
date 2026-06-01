@@ -19,10 +19,23 @@ function Log(msg)
     end
 end
 
+local diagnostic_logger = nil
+pcall(function()
+    local dir = debug.getinfo(1).source:match("@(.*[/\\])") or ""
+    diagnostic_logger = dofile(dir .. "diagnostic_logger.lua")
+end)
+
+local function Diag(event, fields)
+    if diagnostic_logger and diagnostic_logger.write then
+        pcall(diagnostic_logger.write, event, fields or {})
+    end
+end
+
 local function BridgePhase(msg)
     if reaper and reaper.SetExtState then
         reaper.SetExtState("capsule_transfer", "export_phase", tostring(msg or ""), false)
     end
+    Diag("export_phase", { phase = tostring(msg or "") })
 end
 
 -- 直接覆盖 reaper.ShowConsoleMsg，让所有调用都受 ENABLE_CONSOLE 控制
@@ -590,9 +603,14 @@ end
 
 -- 使用 FFmpeg 将 WAV 转换为 OGG
 function ConvertWavToOgg(wavPath, oggPath)
+    Diag("preview_ogg_convert_start", {
+        wav_path = tostring(wavPath or ""),
+        ogg_path = tostring(oggPath or "")
+    })
     -- 检查源文件是否存在
     local wavFile = io.open(wavPath, "r")
     if not wavFile then
+        Diag("preview_ogg_convert_missing_wav", { wav_path = tostring(wavPath or "") })
         reaper.ShowConsoleMsg("✗ WAV 文件不存在: " .. wavPath .. "\n")
         return false
     end
@@ -606,17 +624,29 @@ function ConvertWavToOgg(wavPath, oggPath)
     -- 执行转换
     local result, exitType, exitCode = os.execute(ffmpegCmd .. ' 2>&1')
     local commandOk = (result == true) or (result == 0) or (exitCode == 0)
+    Diag("preview_ogg_convert_process_done", {
+        result = tostring(result),
+        exit_type = tostring(exitType),
+        exit_code = tostring(exitCode),
+        command_ok = tostring(commandOk)
+    })
 
     if commandOk then
         -- 验证输出文件
         local oggFile = io.open(oggPath, "r")
         if oggFile then
             oggFile:close()
+            Diag("preview_ogg_convert_success", { ogg_path = tostring(oggPath or "") })
             return true
         else
+            Diag("preview_ogg_convert_missing_output", { ogg_path = tostring(oggPath or "") })
             return false
         end
     else
+        Diag("preview_ogg_convert_failed", {
+            wav_path = tostring(wavPath or ""),
+            ogg_path = tostring(oggPath or "")
+        })
         return false
     end
 end
@@ -3151,6 +3181,12 @@ function ExportCapsule()
     -- 步骤 5：渲染预览音频（当前 REAPER 实例内临时标签页；不启动第二个 REAPER）
     if exportPreview then
         BridgePhase("rendering preview: starting")
+        Diag("preview_render_start", {
+            mode = "current-instance-tab",
+            capsule_name = tostring(capsuleName or ""),
+            rpp_path = tostring(rppPath or ""),
+            output_dir = tostring(outputDir or "")
+        })
         reaper.ShowConsoleMsg("\n=== 渲染预览音频（进程内临时标签页）===\n")
 
         local origProj = reaper.EnumProjects(-1)
@@ -3177,7 +3213,15 @@ function ExportCapsule()
             end
         end
 
-        reaper.SetExtState("capsule_transfer", "preview_render_debug", "mode=current-instance-tab; rpp=" .. tostring(rppPath) .. "; output_dir=" .. tostring(outputDir) .. "; rewrite_ok=" .. tostring(rewriteOk) .. "; ok=" .. tostring(ok) .. "; error=" .. tostring(renderErr or ""), false)
+        local renderDebug = "mode=current-instance-tab; rpp=" .. tostring(rppPath) .. "; output_dir=" .. tostring(outputDir) .. "; rewrite_ok=" .. tostring(rewriteOk) .. "; ok=" .. tostring(ok) .. "; error=" .. tostring(renderErr or "")
+        reaper.SetExtState("capsule_transfer", "preview_render_debug", renderDebug, false)
+        Diag("preview_render_done", {
+            ok = tostring(ok),
+            opened_render_tab = tostring(openedRenderTab),
+            rewrite_ok = tostring(rewriteOk),
+            debug = renderDebug,
+            error = tostring(renderErr or "")
+        })
         if ok then
             reaper.ShowConsoleMsg("✓ 预览渲染已在当前实例完成\n")
             BridgePhase("rendering preview: finished")

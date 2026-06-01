@@ -103,6 +103,11 @@ end
 local function Phase(msg)
   Heartbeat()
   reaper.SetExtState(SECTION, "export_phase", tostring(msg or ""), false)
+  Diag("bridge_phase", {
+    phase = tostring(msg or ""),
+    instance_id = INSTANCE_ID,
+    selected_items = reaper.CountSelectedMediaItems(0),
+  })
 end
 
 local ENABLE_CONSOLE = false
@@ -144,6 +149,12 @@ local function WriteJsonResult(success, request_id, capsule_name, error_msg, ext
   reaper.SetExtState(SECTION, RESULT_KEY, payload, false)
   reaper.SetExtState(SECTION, "result", payload, false)
   reaper.SetExtState(SECTION, "last_result_debug", payload, false)
+  Diag("bridge_result_written", {
+    request_id = request_id or "",
+    success = tostring(success),
+    capsule_name = capsule_name or "",
+    error = error_msg or "",
+  })
 end
 
 local function ExtractJsonString(json, key)
