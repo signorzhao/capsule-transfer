@@ -7,6 +7,12 @@ __pycache__/
 webapp/node_modules/
 webapp/dist/
 
+# Rust / Tauri build output
+target/
+src-tauri/target/
+src-tauri/gen/
+tools/*/target/
+
 # 数据与日志
 server/data/
 *.db

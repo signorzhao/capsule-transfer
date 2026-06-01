@@ -46,6 +46,14 @@ function normalizeNetworkInfo(payload) {
   };
 }
 
+async function tauriInvoke(command, args = {}) {
+  if (!window.__TAURI_INTERNALS__) {
+    throw new Error('自动更新仅在桌面版中可用。');
+  }
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke(command, args);
+}
+
 async function jsonFetch(path, options = {}) {
   const { timeoutMs, ...fetchOptions } = options;
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
@@ -138,6 +146,10 @@ export const api = {
   getSettings: () => jsonFetch('/settings'),
   updateSettings: (payload) =>
     jsonFetch('/settings', { method: 'PATCH', body: JSON.stringify(payload) }),
+
+  checkUpdate: () => tauriInvoke('check_update'),
+  downloadUpdate: (payload) => tauriInvoke('download_update', payload),
+  installUpdate: (payload) => tauriInvoke('install_update', payload),
 };
 
 export async function uploadCapsuleBundle(file, meta = {}) {
