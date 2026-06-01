@@ -2,8 +2,24 @@
 
 from __future__ import annotations
 
+import ipaddress
 import socket
 from typing import Any
+
+
+def _is_private_or_loopback(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return addr.is_private or addr.is_loopback
+
+
+def _is_loopback(ip: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip).is_loopback
+    except ValueError:
+        return False
 
 
 def _candidate_ips() -> list[str]:
@@ -41,4 +57,7 @@ def network_info(port: int) -> dict[str, Any]:
         "ip": primary,
         "all_ips": primary_ips,
         "port": port,
+        "is_loopback": _is_loopback(primary),
+        "is_private_lan": _is_private_or_loopback(primary),
+        "allowed_for_lan_mode": _is_private_or_loopback(primary),
     }
