@@ -676,6 +676,212 @@ local function SetProjectNumericInfo(key, value)
     reaper.GetSetProjectInfo(0, key, value or 0, true)
 end
 
+local CURRENT_PROJECT_RENDER_STRING_KEYS = {
+    "RENDER_FILE",
+    "RENDER_PATTERN",
+    "RENDER_FORMAT",
+    "RENDER_FORMAT2",
+    "RENDER_METADATA",
+    "RENDER_TARGETS",
+}
+
+local CURRENT_PROJECT_RENDER_NUMERIC_KEYS = {
+    "RENDER_RANGE",
+    "RENDER_SETTINGS",
+    "RENDER_BOUNDSFLAG",
+    "RENDER_STEMS",
+    "RENDER_1X",
+    "RENDER_SRATE",
+    "RENDER_CHANNELS",
+    "RENDER_TAILFLAG",
+    "RENDER_TAILMS",
+    "RENDER_ADDTOPROJ",
+    "RENDER_DITHER",
+    "RENDER_TRIM",
+    "RENDER_FADEIN",
+    "RENDER_FADEOUT",
+    "RENDER_NORMALIZE",
+    "RENDER_NORMALIZE_TARGET",
+    "RENDER_BRICKWALL",
+}
+
+local OGG_RENDER_CONFIG = "dmdnbwAAAD8AgAAAAIAAAAAgAAAAAAEAAA=="
+
+local function CaptureProjectRenderState()
+    local state = {
+        strings = {},
+        numbers = {},
+        tracks = {},
+        items = {},
+    }
+    for _, key in ipairs(CURRENT_PROJECT_RENDER_STRING_KEYS) do
+        state.strings[key] = GetProjectStringInfo(key)
+    end
+    for _, key in ipairs(CURRENT_PROJECT_RENDER_NUMERIC_KEYS) do
+        state.numbers[key] = GetProjectNumericInfo(key)
+    end
+    local timeStart, timeEnd = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+    local loopStart, loopEnd = reaper.GetSet_LoopTimeRange(false, true, 0, 0, false)
+    state.time_start = timeStart
+    state.time_end = timeEnd
+    state.loop_start = loopStart
+    state.loop_end = loopEnd
+    state.cursor = reaper.GetCursorPosition()
+
+    for i = 0, reaper.CountTracks(0) - 1 do
+        local track = reaper.GetTrack(0, i)
+        if track then
+            local ok, chunk = reaper.GetTrackStateChunk(track, "", false)
+            table.insert(state.tracks, {
+                track = track,
+                chunk = ok and chunk or nil,
+                solo = reaper.GetMediaTrackInfo_Value(track, "I_SOLO"),
+                mute = reaper.GetMediaTrackInfo_Value(track, "B_MUTE"),
+            })
+        end
+    end
+
+    for ti = 0, reaper.CountTracks(0) - 1 do
+        local track = reaper.GetTrack(0, ti)
+        if track then
+            for ii = 0, reaper.CountTrackMediaItems(track) - 1 do
+                local item = reaper.GetTrackMediaItem(track, ii)
+                if item then
+                    table.insert(state.items, {
+                        item = item,
+                        selected = reaper.IsMediaItemSelected(item),
+                    })
+                end
+            end
+        end
+    end
+
+    return state
+end
+
+local function RestoreProjectRenderState(state)
+    if not state then return end
+    reaper.PreventUIRefresh(1)
+    local ok, err = pcall(function()
+        for _, entry in ipairs(state.tracks or {}) do
+            if entry.track then
+                if entry.chunk then
+                    pcall(reaper.SetTrackStateChunk, entry.track, entry.chunk, false)
+                else
+                    pcall(reaper.SetMediaTrackInfo_Value, entry.track, "I_SOLO", entry.solo or 0)
+                    pcall(reaper.SetMediaTrackInfo_Value, entry.track, "B_MUTE", entry.mute or 0)
+                end
+            end
+        end
+        for _, entry in ipairs(state.items or {}) do
+            if entry.item then
+                pcall(reaper.SetMediaItemSelected, entry.item, entry.selected == true)
+            end
+        end
+        for key, value in pairs(state.strings or {}) do
+            pcall(SetProjectStringInfo, key, value)
+        end
+        for key, value in pairs(state.numbers or {}) do
+            pcall(SetProjectNumericInfo, key, value)
+        end
+        pcall(reaper.GetSet_LoopTimeRange, true, false, state.time_start or 0, state.time_end or 0, false)
+        pcall(reaper.GetSet_LoopTimeRange, true, true, state.loop_start or 0, state.loop_end or 0, false)
+        if state.cursor then
+            pcall(reaper.SetEditCurPos, state.cursor, false, false)
+        end
+        pcall(reaper.UpdateArrange)
+    end)
+    reaper.PreventUIRefresh(-1)
+    if not ok then
+        Diag("restore_project_state_failed", { error = tostring(err or "") })
+        reaper.ShowConsoleMsg("  restore project state failed: " .. tostring(err) .. "\n")
+    end
+end
+
+local function AddTrackToSet(set, track)
+    if track and type(track) == "userdata" then set[track] = true end
+end
+
+local function AddFolderChildrenToSet(set, track)
+    if not track then return end
+    local folderDepth = reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH")
+    if folderDepth ~= 1 then return end
+    local startIdx = reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER")
+    local depth = 1
+    for i = startIdx, reaper.CountTracks(0) - 1 do
+        local child = reaper.GetTrack(0, i)
+        if not child then break end
+        AddTrackToSet(set, child)
+        depth = depth + reaper.GetMediaTrackInfo_Value(child, "I_FOLDERDEPTH")
+        if depth <= 0 then break end
+    end
+end
+
+local function AddParentTracksToSet(set, track)
+    local parent = track and reaper.GetParentTrack(track) or nil
+    while parent do
+        AddTrackToSet(set, parent)
+        parent = reaper.GetParentTrack(parent)
+    end
+end
+
+local function AddSendRelatedTracksToSet(set)
+    local changed = true
+    while changed do
+        changed = false
+        for track, _ in pairs(set) do
+            local sendCount = reaper.GetTrackNumSends(track, 0) or 0
+            for i = 0, sendCount - 1 do
+                local ok, dest = pcall(reaper.GetTrackSendInfo_Value, track, 0, i, "P_DESTTRACK")
+                if ok and dest and type(dest) == "userdata" and not set[dest] then
+                    set[dest] = true
+                    changed = true
+                end
+            end
+            local receiveCount = reaper.GetTrackNumSends(track, -1) or 0
+            for i = 0, receiveCount - 1 do
+                local ok, src = pcall(reaper.GetTrackSendInfo_Value, track, -1, i, "P_SRCTRACK")
+                if ok and src and type(src) == "userdata" and not set[src] then
+                    set[src] = true
+                    changed = true
+                end
+            end
+        end
+    end
+end
+
+local function BuildSelectedItemRenderTrackSet()
+    local set = {}
+    for i = 0, reaper.CountSelectedMediaItems(0) - 1 do
+        local item = reaper.GetSelectedMediaItem(0, i)
+        local track = item and reaper.GetMediaItemTrack(item) or nil
+        AddTrackToSet(set, track)
+        AddParentTracksToSet(set, track)
+        AddFolderChildrenToSet(set, track)
+    end
+    AddSendRelatedTracksToSet(set)
+    return set
+end
+
+local function ApplyInlinePreviewTrackIsolation(trackSet)
+    local selectedCount = 0
+    for _ in pairs(trackSet or {}) do selectedCount = selectedCount + 1 end
+    if selectedCount == 0 then
+        return 0
+    end
+    for i = 0, reaper.CountTracks(0) - 1 do
+        local track = reaper.GetTrack(0, i)
+        if track then
+            reaper.SetMediaTrackInfo_Value(track, "I_SOLO", 0)
+        end
+    end
+    for track, _ in pairs(trackSet) do
+        reaper.SetMediaTrackInfo_Value(track, "B_MUTE", 0)
+        reaper.SetMediaTrackInfo_Value(track, "I_SOLO", 2)
+    end
+    return selectedCount
+end
+
 local function RestoreCurrentProjectRenderState(state)
     if not state then return end
     SetProjectStringInfo("RENDER_FILE", state.render_file)
@@ -687,7 +893,7 @@ local function RestoreCurrentProjectRenderState(state)
     reaper.GetSet_LoopTimeRange(true, false, state.time_start or 0, state.time_end or 0, false)
 end
 
-function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime)
+function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, hasMidiItems)
     reaper.ShowConsoleMsg("\n[RenderPreviewAudioFromCurrentProject] start\n")
     reaper.ShowConsoleMsg("  output: " .. tostring(outputPath) .. "\n")
 
@@ -707,14 +913,7 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime)
     local renderPath = outputPath
     local tempWavPath = nil
     if isOggOutput then
-        local ffmpegAvailable = CheckFFmpegAvailable()
-        if ffmpegAvailable then
-            tempWavPath = string.gsub(outputPath, "%.ogg$", "_temp.wav")
-            renderPath = tempWavPath
-        else
-            renderPath = string.gsub(outputPath, "%.ogg$", ".wav")
-            reaper.ShowConsoleMsg("  ffmpeg unavailable, keeping WAV preview\n")
-        end
+        renderPath = outputPath
     end
 
     local renderDir, renderBase = SplitOutputPath(renderPath)
@@ -722,31 +921,54 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime)
     if outputPath ~= renderPath then
         os.remove(outputPath)
     end
-    local timeStart, timeEnd = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
-    local state = {
-        render_file = GetProjectStringInfo("RENDER_FILE"),
-        render_pattern = GetProjectStringInfo("RENDER_PATTERN"),
-        render_format = GetProjectStringInfo("RENDER_FORMAT"),
-        render_range = GetProjectNumericInfo("RENDER_RANGE"),
-        render_stems = GetProjectNumericInfo("RENDER_STEMS"),
-        render_1x = GetProjectNumericInfo("RENDER_1X"),
-        time_start = timeStart,
-        time_end = timeEnd,
-    }
+    local state = CaptureProjectRenderState()
+    local trackSet = BuildSelectedItemRenderTrackSet()
+    local isolatedTrackCount = 0
 
     local renderOk = false
     local ok, err = pcall(function()
+        BridgePhase("rendering preview: preparing current project")
+        reaper.PreventUIRefresh(1)
+        isolatedTrackCount = ApplyInlinePreviewTrackIsolation(trackSet)
+        reaper.PreventUIRefresh(-1)
+        reaper.ShowConsoleMsg("  isolated tracks: " .. tostring(isolatedTrackCount) .. "\n")
         reaper.GetSet_LoopTimeRange(true, false, previewStartTime, previewEndTime, false)
         SetProjectStringInfo("RENDER_FILE", renderDir)
         SetProjectStringInfo("RENDER_PATTERN", renderBase)
-        -- Render WAV from the current project, then convert to OGG if needed.
-        -- This avoids depending on the user's REAPER encoder configuration.
-        SetProjectStringInfo("RENDER_FORMAT", "evaw")
+        if isOggOutput then
+            SetProjectStringInfo("RENDER_FORMAT", OGG_RENDER_CONFIG)
+        else
+            SetProjectStringInfo("RENDER_FORMAT", "evaw")
+        end
         SetProjectNumericInfo("RENDER_RANGE", 1)
+        SetProjectNumericInfo("RENDER_BOUNDSFLAG", 2)
         SetProjectNumericInfo("RENDER_STEMS", 0)
-        SetProjectNumericInfo("RENDER_1X", 0)
+        SetProjectNumericInfo("RENDER_1X", hasMidiItems and 2 or 0)
+        SetProjectNumericInfo("RENDER_SETTINGS", 0)
+        SetProjectNumericInfo("RENDER_TAILFLAG", 0)
+        SetProjectNumericInfo("RENDER_TAILMS", 0)
+        SetProjectNumericInfo("RENDER_ADDTOPROJ", 0)
+        SetProjectNumericInfo("RENDER_DITHER", 0)
+        SetProjectNumericInfo("RENDER_TRIM", 0)
+        SetProjectNumericInfo("RENDER_FADEIN", 0)
+        SetProjectNumericInfo("RENDER_FADEOUT", 0)
+        SetProjectNumericInfo("RENDER_NORMALIZE", 0)
+        SetProjectNumericInfo("RENDER_NORMALIZE_TARGET", 0)
+        SetProjectNumericInfo("RENDER_BRICKWALL", 0)
         reaper.UpdateArrange()
+        Diag("inline_render_settings_applied", {
+            output = tostring(renderPath or ""),
+            render_file = tostring(renderDir or ""),
+            render_pattern = tostring(renderBase or ""),
+            boundsflag = tostring(GetProjectNumericInfo("RENDER_BOUNDSFLAG")),
+            start_time = tostring(previewStartTime),
+            end_time = tostring(previewEndTime)
+        })
+        BridgePhase("rendering preview: rendering current project")
+        local renderMethod = "none"
+        local renderRet = ""
         if reaper.RenderProject_Table then
+            renderMethod = "RenderProject_Table"
             local success, ret = reaper.RenderProject_Table(
                 nil,
                 2,
@@ -759,15 +981,62 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime)
                 false
             )
             renderOk = (success == true and ret ~= false)
-        elseif reaper.RenderProject then
+            renderRet = "success=" .. tostring(success) .. "; ret=" .. tostring(ret)
+            reaper.ShowConsoleMsg("  RenderProject_Table: " .. renderRet .. "\n")
+            Diag("inline_render_api_result", {
+                method = renderMethod,
+                result = renderRet,
+                output = tostring(renderPath or "")
+            })
+        end
+        if not renderOk and reaper.RenderProject then
+            renderMethod = "RenderProject"
             local ret = reaper.RenderProject(nil, false, false, renderPath)
             renderOk = tonumber(ret or 0) > 0
-        else
-            renderOk = false
+            renderRet = "ret=" .. tostring(ret)
+            reaper.ShowConsoleMsg("  RenderProject fallback: " .. renderRet .. "\n")
+            Diag("inline_render_api_result", {
+                method = renderMethod,
+                result = renderRet,
+                output = tostring(renderPath or "")
+            })
+        end
+        if not renderOk then
+            renderMethod = "current_project_settings_then_Main_OnCommand_42230"
+            reaper.GetSet_LoopTimeRange(true, false, previewStartTime, previewEndTime, false)
+            reaper.GetSet_LoopTimeRange(true, true, previewStartTime, previewEndTime, false)
+            SetProjectNumericInfo("RENDER_BOUNDSFLAG", 2)
+            SetProjectNumericInfo("RENDER_RANGE", 1)
+            reaper.UpdateArrange()
+            reaper.Main_OnCommand(42230, 0)  -- Render with the current project's temporary preview settings.
+            local f = io.open(renderPath, "r")
+            if f then
+                f:close()
+                renderOk = true
+                renderRet = "output_exists=true"
+            else
+                renderRet = "output_exists=false"
+            end
+            reaper.ShowConsoleMsg("  Render 42230 fallback: " .. renderRet .. "\n")
+            Diag("inline_render_api_result", {
+                method = renderMethod,
+                result = renderRet,
+                output = tostring(renderPath or "")
+            })
+        end
+        if not renderOk then
+            Diag("inline_render_api_failed", {
+                last_method = tostring(renderMethod),
+                last_result = tostring(renderRet),
+                output = tostring(renderPath or ""),
+                start_time = tostring(previewStartTime),
+                end_time = tostring(previewEndTime),
+                isolated_tracks = tostring(isolatedTrackCount)
+            })
         end
     end)
 
-    RestoreCurrentProjectRenderState(state)
+    RestoreProjectRenderState(state)
 
     if not ok then
         reaper.ShowConsoleMsg("  current project preview render failed: " .. tostring(err) .. "\n")
@@ -790,10 +1059,9 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime)
             os.execute('del /Q "' .. tempWavPath:gsub("/", "\\") .. '" >nul 2>&1')
             return true
         end
-        reaper.ShowConsoleMsg("  WAV to OGG conversion failed, keeping WAV preview\n")
-        local finalWavPath = string.gsub(outputPath, "%.ogg$", ".wav")
-        os.execute('move /Y "' .. tempWavPath:gsub("/", "\\") .. '" "' .. finalWavPath:gsub("/", "\\") .. '" >nul 2>&1')
-        return true
+        reaper.ShowConsoleMsg("  WAV to OGG conversion failed\n")
+        os.execute('del /Q "' .. tempWavPath:gsub("/", "\\") .. '" >nul 2>&1')
+        return false
     end
 
     return true
@@ -1667,9 +1935,18 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
         -- 删除旧的渲染设置（可能散布在文件中）
         content = content:gsub('RENDER_1X%s+[^\n]*\n?', '')
         content = content:gsub('RENDER_RESAMPLE%s+[^\n]*\n?', '')
+        content = content:gsub('RENDER_SETTINGS%s+[^\n]*\n?', '')
+        content = content:gsub('RENDER_BOUNDSFLAG%s+[^\n]*\n?', '')
+        content = content:gsub('RENDER_TAILFLAG%s+[^\n]*\n?', '')
+        content = content:gsub('RENDER_TAILMS%s+[^\n]*\n?', '')
         content = content:gsub('RENDER_ADDTOPROJ%s+[^\n]*\n?', '')
         content = content:gsub('RENDER_DITHER%s+[^\n]*\n?', '')
         content = content:gsub('RENDER_TRIM%s+[^\n]*\n?', '')
+        content = content:gsub('RENDER_FADEIN%s+[^\n]*\n?', '')
+        content = content:gsub('RENDER_FADEOUT%s+[^\n]*\n?', '')
+        content = content:gsub('RENDER_NORMALIZE%s+[^\n]*\n?', '')
+        content = content:gsub('RENDER_NORMALIZE_TARGET%s+[^\n]*\n?', '')
+        content = content:gsub('RENDER_BRICKWALL%s+[^\n]*\n?', '')
         
         -- 构建顶部渲染设置块（不包含 RENDER_CFG，那个放在 SAMPLERATE 后面）
         -- RENDER_RANGE 2 = 时间选区，后两参为 start/end，必须与 SELECTION 一致
@@ -1680,6 +1957,10 @@ RENDER_FMT 0 2 44100
 RENDER_RANGE 2 %.6f %.6f 0 1000
 RENDER_STEMS 0
 RENDER_1X %d
+RENDER_ADDTOPROJ 0
+RENDER_DITHER 0
+RENDER_TRIM 0 0 0 0
+RENDER_NORMALIZE 0
 ]], QuoteRppValue(renderDir), QuoteRppValue(capsuleName), actualStartTime, actualEndTime, render1x)
         
         -- 在 REAPER_PROJECT 行后插入渲染设置
@@ -2589,6 +2870,17 @@ function FixRPPRenderSettings(rppPath, outputPath, startTime, endTime, capsuleNa
     content = string.gsub(content, 'RENDER_RANGE%s+[^\n]*\n?', '')
     content = string.gsub(content, 'RENDER_STEMS%s+%d+\n?', '')
     content = string.gsub(content, 'RENDER_1X%s+[^\n]*\n?', '')
+    content = string.gsub(content, 'RENDER_BOUNDSFLAG%s+[^\n]*\n?', '')
+    content = string.gsub(content, 'RENDER_TAILFLAG%s+[^\n]*\n?', '')
+    content = string.gsub(content, 'RENDER_TAILMS%s+[^\n]*\n?', '')
+    content = string.gsub(content, 'RENDER_ADDTOPROJ%s+[^\n]*\n?', '')
+    content = string.gsub(content, 'RENDER_DITHER%s+[^\n]*\n?', '')
+    content = string.gsub(content, 'RENDER_TRIM%s+[^\n]*\n?', '')
+    content = string.gsub(content, 'RENDER_FADEIN%s+[^\n]*\n?', '')
+    content = string.gsub(content, 'RENDER_FADEOUT%s+[^\n]*\n?', '')
+    content = string.gsub(content, 'RENDER_NORMALIZE%s+[^\n]*\n?', '')
+    content = string.gsub(content, 'RENDER_NORMALIZE_TARGET%s+[^\n]*\n?', '')
+    content = string.gsub(content, 'RENDER_BRICKWALL%s+[^\n]*\n?', '')
     content = string.gsub(content, 'LOOP%s+%d+%.%d+%s+%d+%.%d+\n?', '')  -- 删除时间选择 LOOP
 
     -- 关键修复：替换 <APPLYFX_CFG> 内的 RENDER_FMT
@@ -2672,6 +2964,10 @@ RENDER_FMT 0 2 44100
 RENDER_RANGE 2 %.6f %.6f 0 1000
 RENDER_STEMS 0
 RENDER_1X %d
+RENDER_ADDTOPROJ 0
+RENDER_DITHER 0
+RENDER_TRIM 0 0 0 0
+RENDER_NORMALIZE 0
 ]], QuoteRppValue(outputDir_for_render), QuoteRppValue(baseName), startTime, endTime, render1x)
 
     -- 在 <REAPER_PROJECT> 行后插入渲染设置
@@ -3177,6 +3473,36 @@ function ExportCapsule()
     BridgePhase("saving capsule: writing metadata")
     GenerateCapsuleMetadata(outputDir, capsuleName, capsuleType, collectedItemsInfo, mediaFiles, failedFiles)
     BridgePhase("saving capsule: done")
+
+    if exportPreview then
+        BridgePhase("rendering preview: starting")
+        local previewOutputPath = JoinPath(outputDir, capsuleName .. ".ogg")
+        Diag("preview_render_start", {
+            mode = "current-project-inline",
+            capsule_name = tostring(capsuleName or ""),
+            preview_path = tostring(previewOutputPath or ""),
+            output_dir = tostring(outputDir or "")
+        })
+        reaper.ShowConsoleMsg("\n=== inline current-project preview render ===\n")
+
+        local ok, renderResult = pcall(RenderPreviewAudioFromCurrentProject, previewOutputPath, startTime, endTime, hasMidiItems)
+        local renderOk = ok and renderResult == true
+        local renderDebug = "mode=current-project-inline; preview_path=" .. tostring(previewOutputPath) .. "; output_dir=" .. tostring(outputDir) .. "; ok=" .. tostring(renderOk) .. "; error=" .. tostring((not ok and renderResult) or "")
+        reaper.SetExtState("capsule_transfer", "preview_render_debug", renderDebug, false)
+        Diag("preview_render_done", {
+            ok = tostring(renderOk),
+            debug = renderDebug,
+            error = tostring((not ok and renderResult) or "")
+        })
+        if renderOk then
+            reaper.ShowConsoleMsg("preview render finished in current project\n")
+            BridgePhase("rendering preview: finished")
+        else
+            reaper.ShowConsoleMsg("preview render failed in current project: " .. tostring(renderResult) .. "\n")
+            BridgePhase("rendering preview: skipped render error")
+        end
+        exportPreview = false
+    end
     
     -- 步骤 5：渲染预览音频（当前 REAPER 实例内临时标签页；不启动第二个 REAPER）
     if exportPreview then

@@ -954,8 +954,9 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
             event.dataTransfer.setData('application/x-capsule-folder-id', folder.id);
           }}
           onDragOver={(event) => {
-            const hasCapsule = Array.from(event.dataTransfer.types).includes('text/plain');
-            const hasFolder = Array.from(event.dataTransfer.types).includes('application/x-capsule-folder-id');
+            const dragTypes = Array.from(event.dataTransfer.types || []);
+            const hasCapsule = dragTypes.includes('application/x-capsule-id') || dragTypes.includes('text/plain') || Boolean(draggingId);
+            const hasFolder = dragTypes.includes('application/x-capsule-folder-id') || Boolean(draggingFolderId);
             if ((!hasCapsule || !canDropCapsule) && (!hasFolder || !canDropFolder)) return;
             event.preventDefault();
             event.dataTransfer.dropEffect = hasFolder ? 'move' : 'copy';
@@ -971,7 +972,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
               moveFolder(droppedFolderId, folderDropTargetId);
               return;
             }
-            const capsuleId = event.dataTransfer.getData('text/plain') || draggingId;
+            const capsuleId = event.dataTransfer.getData('application/x-capsule-id') || event.dataTransfer.getData('text/plain') || draggingId;
             if (capsuleId && canDropCapsule) addToFolder(folder.id, capsuleId);
           }}
           onDragEnd={() => {
@@ -1118,6 +1119,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
                     onDragStart={(event) => {
                       setDraggingId(cap.id);
                       event.dataTransfer.effectAllowed = 'copy';
+                      event.dataTransfer.setData('application/x-capsule-id', cap.id);
                       event.dataTransfer.setData('text/plain', cap.id);
                     }}
                     onDragEnd={() => {
