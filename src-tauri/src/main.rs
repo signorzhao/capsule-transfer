@@ -8,6 +8,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::Mutex;
+use std::{thread, time::Duration};
 use tauri::Manager;
 use tauri_plugin_notification::NotificationExt;
 
@@ -488,7 +489,10 @@ fn install_update(
     command
         .spawn()
         .map_err(|e| format!("启动更新器失败：{e}"))?;
-    app.exit(0);
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(300));
+        app.exit(0);
+    });
     Ok(())
 }
 

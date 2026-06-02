@@ -1419,6 +1419,8 @@ function SettingsView({ networkInfo, apiBase, bridgeStatus, onRefreshBridge, onO
         version: downloaded.version,
         build: downloaded.build,
       });
+      toast.success('Updater started. The app will close to finish installation.');
+      setUpdatePhase('installing');
     } catch (e) {
       toast.error(`安装更新失败：${e.message}`);
       setUpdateBusy(false);

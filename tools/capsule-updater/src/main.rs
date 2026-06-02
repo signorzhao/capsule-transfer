@@ -289,6 +289,7 @@ fn relaunch(app_dir: &Path, exe: &str, log_path: &Path) -> Result<()> {
 
 fn wait_for_process_exit(pid: u32, timeout: Duration, log_path: &Path) -> Result<()> {
     let started = SystemTime::now();
+    log(log_path, &format!("waiting for process {pid} to exit"))?;
     while process_exists(pid) {
         if started.elapsed().unwrap_or_default() > timeout {
             return Err(anyhow!("process {pid} did not exit within {:?}", timeout));
