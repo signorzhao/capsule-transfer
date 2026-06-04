@@ -241,6 +241,8 @@ fn start_backend(app: &tauri::App) -> Option<Child> {
     let exe_path = find_backend_exe(app)?;
     let work_dir = exe_path.parent()?;
 
+    kill_existing_backend_processes();
+
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -255,6 +257,22 @@ fn start_backend(app: &tauri::App) -> Option<Child> {
     #[cfg(not(target_os = "windows"))]
     {
         Command::new(&exe_path).current_dir(work_dir).spawn().ok()
+    }
+}
+
+fn kill_existing_backend_processes() {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("taskkill")
+            .args(["/F", "/IM", "flask-backend.exe"])
+            .creation_flags(0x08000000)
+            .output();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = Command::new("pkill").args(["-f", "flask-backend"]).output();
     }
 }
 

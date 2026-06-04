@@ -117,6 +117,43 @@ local function PathExists(path)
     return false
 end
 
+local function GetFileSize(path)
+    if not path or path == "" then
+        return 0
+    end
+    local f = io.open(path, "rb")
+    if not f then
+        return 0
+    end
+    local size = f:seek("end") or 0
+    f:close()
+    return size
+end
+
+local function WaitForStableFileSize(path, minBytes, stableMs, timeoutMs)
+    local started = reaper.time_precise and reaper.time_precise() or os.clock()
+    local lastSize = -1
+    local lastChanged = started
+    minBytes = minBytes or 1
+    stableMs = stableMs or 500
+    timeoutMs = timeoutMs or 5000
+
+    while true do
+        local now = reaper.time_precise and reaper.time_precise() or os.clock()
+        local size = GetFileSize(path)
+        if size ~= lastSize then
+            lastSize = size
+            lastChanged = now
+        end
+        if size >= minBytes and ((now - lastChanged) * 1000) >= stableMs then
+            return size
+        end
+        if ((now - started) * 1000) >= timeoutMs then
+            return size
+        end
+    end
+end
+
 local function QuoteWindowsArg(value)
     return '"' .. tostring(value or ""):gsub('"', '""') .. '"'
 end
@@ -592,7 +629,7 @@ function CheckFFmpegAvailable()
     handle:close()
 
     -- 检查输出是否包含 "ffmpeg" 字符串
-    if string.find(output, "ffmpeg") then
+    if string.find(output, "ffmpeg version", 1, true) then
         -- 提取版本信息
         local version = string.match(output, "ffmpeg version ([%d%.]+)")
         return true, version or "已安装"
@@ -616,19 +653,47 @@ function ConvertWavToOgg(wavPath, oggPath)
     end
     wavFile:close()
 
+    local ffmpegAvailable, ffmpegVersion = CheckFFmpegAvailable()
+    Diag("preview_ogg_convert_ffmpeg_check", {
+        available = tostring(ffmpegAvailable),
+        version = tostring(ffmpegVersion or "")
+    })
+    if not ffmpegAvailable then
+        Diag("preview_ogg_convert_failed", {
+            wav_path = tostring(wavPath or ""),
+            ogg_path = tostring(oggPath or ""),
+            reason = "ffmpeg_unavailable",
+            detail = tostring(ffmpegVersion or "")
+        })
+        return false
+    end
+
     -- 构建 FFmpeg 命令
     -- -q:a 4 是 OGG Vorbis 质量设置（0-10，4 是较好的质量）
     -- -c:a libvorbis 指定使用 Vorbis 编码器
     local ffmpegCmd = string.format('ffmpeg -y -i "%s" -c:a libvorbis -q:a 4 "%s"', wavPath, oggPath)
+    local ffmpegLogPath = tostring(oggPath or "") .. ".ffmpeg.log"
+    os.remove(ffmpegLogPath)
 
     -- 执行转换
-    local result, exitType, exitCode = os.execute(ffmpegCmd .. ' 2>&1')
+    local result, exitType, exitCode = os.execute(ffmpegCmd .. ' > "' .. ffmpegLogPath .. '" 2>&1')
     local commandOk = (result == true) or (result == 0) or (exitCode == 0)
+    local ffmpegOutput = ""
+    local ffmpegLog = io.open(ffmpegLogPath, "r")
+    if ffmpegLog then
+        ffmpegOutput = ffmpegLog:read("*a") or ""
+        ffmpegLog:close()
+        os.remove(ffmpegLogPath)
+    end
+    if #ffmpegOutput > 1000 then
+        ffmpegOutput = string.sub(ffmpegOutput, 1, 1000)
+    end
     Diag("preview_ogg_convert_process_done", {
         result = tostring(result),
         exit_type = tostring(exitType),
         exit_code = tostring(exitCode),
-        command_ok = tostring(commandOk)
+        command_ok = tostring(commandOk),
+        ffmpeg_output = tostring(ffmpegOutput)
     })
 
     if commandOk then
@@ -645,7 +710,8 @@ function ConvertWavToOgg(wavPath, oggPath)
     else
         Diag("preview_ogg_convert_failed", {
             wav_path = tostring(wavPath or ""),
-            ogg_path = tostring(oggPath or "")
+            ogg_path = tostring(oggPath or ""),
+            ffmpeg_output = tostring(ffmpegOutput)
         })
         return false
     end
@@ -657,6 +723,41 @@ local function SplitOutputPath(path)
     local name = tostring(path or ""):match("[^/\\]+$") or ""
     local base = name:gsub("%.[^%.]+$", "")
     return dir, base, name
+end
+
+local function UpdatePreviewAudioMetadata(outputDir, previewFileName)
+    if not outputDir or outputDir == "" or not previewFileName or previewFileName == "" then
+        return false
+    end
+    local metadataPath = JoinPath(outputDir, "metadata.json")
+    local file = io.open(metadataPath, "r")
+    if not file then
+        return false
+    end
+    local content = file:read("*a") or ""
+    file:close()
+
+    local escapedPreview = EscapeJSON(previewFileName)
+    local replaced = false
+    content = content:gsub('("preview_audio"%s*:%s*")[^"]*(")', function(prefix, suffix)
+        replaced = true
+        return prefix .. escapedPreview .. suffix
+    end, 1)
+    if not replaced then
+        return false
+    end
+
+    local out = io.open(metadataPath, "w")
+    if not out then
+        return false
+    end
+    out:write(content)
+    out:close()
+    Diag("preview_metadata_updated", {
+        metadata_path = tostring(metadataPath or ""),
+        preview_audio = tostring(previewFileName or "")
+    })
+    return true
 end
 
 local function GetProjectStringInfo(key)
@@ -675,6 +776,8 @@ end
 local function SetProjectNumericInfo(key, value)
     reaper.GetSetProjectInfo(0, key, value or 0, true)
 end
+
+local MIN_PREVIEW_OUTPUT_BYTES = 1024
 
 local CURRENT_PROJECT_RENDER_STRING_KEYS = {
     "RENDER_FILE",
@@ -924,10 +1027,17 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, ha
     local state = CaptureProjectRenderState()
     local trackSet = BuildSelectedItemRenderTrackSet()
     local isolatedTrackCount = 0
+    local forcedMediaOnline = false
 
     local renderOk = false
     local ok, err = pcall(function()
         BridgePhase("rendering preview: preparing current project")
+        reaper.Main_OnCommand(40101, 0)  -- Item: Set all media online.
+        forcedMediaOnline = true
+        Diag("preview_force_media_online", {
+            command_id = "40101",
+            timing = "before_inline_render_setup"
+        })
         reaper.PreventUIRefresh(1)
         isolatedTrackCount = ApplyInlinePreviewTrackIsolation(trackSet)
         reaper.PreventUIRefresh(-1)
@@ -935,7 +1045,7 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, ha
         reaper.GetSet_LoopTimeRange(true, false, previewStartTime, previewEndTime, false)
         SetProjectStringInfo("RENDER_FILE", renderDir)
         SetProjectStringInfo("RENDER_PATTERN", renderBase)
-        if isOggOutput then
+        if string.match(renderPath, "%.ogg$") then
             SetProjectStringInfo("RENDER_FORMAT", OGG_RENDER_CONFIG)
         else
             SetProjectStringInfo("RENDER_FORMAT", "evaw")
@@ -943,7 +1053,7 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, ha
         SetProjectNumericInfo("RENDER_RANGE", 1)
         SetProjectNumericInfo("RENDER_BOUNDSFLAG", 2)
         SetProjectNumericInfo("RENDER_STEMS", 0)
-        SetProjectNumericInfo("RENDER_1X", hasMidiItems and 2 or 0)
+        SetProjectNumericInfo("RENDER_1X", 2)
         SetProjectNumericInfo("RENDER_SETTINGS", 0)
         SetProjectNumericInfo("RENDER_TAILFLAG", 0)
         SetProjectNumericInfo("RENDER_TAILMS", 0)
@@ -961,6 +1071,8 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, ha
             render_file = tostring(renderDir or ""),
             render_pattern = tostring(renderBase or ""),
             boundsflag = tostring(GetProjectNumericInfo("RENDER_BOUNDSFLAG")),
+            render_1x = tostring(GetProjectNumericInfo("RENDER_1X")),
+            has_midi_items = tostring(hasMidiItems),
             start_time = tostring(previewStartTime),
             end_time = tostring(previewEndTime)
         })
@@ -1008,20 +1120,27 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, ha
             SetProjectNumericInfo("RENDER_BOUNDSFLAG", 2)
             SetProjectNumericInfo("RENDER_RANGE", 1)
             reaper.UpdateArrange()
+            reaper.Main_OnCommand(40101, 0)  -- Item: Set all media online.
+            forcedMediaOnline = true
+            Diag("preview_force_media_online", {
+                command_id = "40101",
+                timing = "immediately_before_42230"
+            })
             reaper.Main_OnCommand(42230, 0)  -- Render with the current project's temporary preview settings.
-            local f = io.open(renderPath, "r")
-            if f then
-                f:close()
+            local minRenderBytes = string.match(renderPath, "%.ogg$") and 1 or MIN_PREVIEW_OUTPUT_BYTES
+            local outputSize = WaitForStableFileSize(renderPath, minRenderBytes, 500, 10000)
+            if outputSize >= minRenderBytes then
                 renderOk = true
-                renderRet = "output_exists=true"
+                renderRet = "output_exists=true; output_size_bytes=" .. tostring(outputSize)
             else
-                renderRet = "output_exists=false"
+                renderRet = "output_exists=" .. tostring(outputSize > 0) .. "; output_size_bytes=" .. tostring(outputSize)
             end
             reaper.ShowConsoleMsg("  Render 42230 fallback: " .. renderRet .. "\n")
             Diag("inline_render_api_result", {
                 method = renderMethod,
                 result = renderRet,
-                output = tostring(renderPath or "")
+                output = tostring(renderPath or ""),
+                output_size_bytes = tostring(outputSize)
             })
         end
         if not renderOk then
@@ -1036,31 +1155,96 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, ha
         end
     end)
 
+    if forcedMediaOnline then
+        Diag("preview_restore_media_offline_skipped", {
+            reason = "preserve_user_online_state",
+            timing = "after_inline_render"
+        })
+    end
+
     RestoreProjectRenderState(state)
 
     if not ok then
         reaper.ShowConsoleMsg("  current project preview render failed: " .. tostring(err) .. "\n")
+        os.remove(renderPath)
+        if outputPath ~= renderPath then os.remove(outputPath) end
         return false
     end
     if not renderOk then
         reaper.ShowConsoleMsg("  current project preview render API was unavailable or returned failure\n")
+        os.remove(renderPath)
+        if outputPath ~= renderPath then os.remove(outputPath) end
         return false
     end
 
-    local f = io.open(renderPath, "r")
-    if not f then
+    local outputSize = GetFileSize(renderPath)
+    if outputSize <= 0 then
         reaper.ShowConsoleMsg("  preview output not found: " .. tostring(renderPath) .. "\n")
         return false
     end
-    f:close()
+    local minOutputBytes = string.match(renderPath, "%.ogg$") and 1 or MIN_PREVIEW_OUTPUT_BYTES
+    if outputSize < minOutputBytes then
+        reaper.ShowConsoleMsg("  preview output too small: " .. tostring(outputSize) .. " bytes\n")
+        Diag("preview_render_output_too_small", {
+            output = tostring(renderPath or ""),
+            output_size_bytes = tostring(outputSize),
+            min_size_bytes = tostring(minOutputBytes)
+        })
+        os.remove(renderPath)
+        return false
+    end
 
     if tempWavPath and isOggOutput then
         if ConvertWavToOgg(tempWavPath, outputPath) then
-            os.execute('del /Q "' .. tempWavPath:gsub("/", "\\") .. '" >nul 2>&1')
-            return true
+            local oggSize = WaitForStableFileSize(outputPath, 1, 500, 5000)
+            Diag("preview_ogg_convert_output_checked", {
+                wav_path = tostring(tempWavPath or ""),
+                ogg_path = tostring(outputPath or ""),
+                output_size_bytes = tostring(oggSize)
+            })
+            if oggSize > 0 then
+                os.remove(tempWavPath)
+                return true
+            end
+            reaper.ShowConsoleMsg("  converted OGG output too small: " .. tostring(oggSize) .. " bytes\n")
+            os.remove(outputPath)
         end
         reaper.ShowConsoleMsg("  WAV to OGG conversion failed\n")
-        os.execute('del /Q "' .. tempWavPath:gsub("/", "\\") .. '" >nul 2>&1')
+        local wavOutputPath = string.gsub(outputPath, "%.ogg$", ".wav")
+        os.remove(wavOutputPath)
+        local renameOk = os.rename(tempWavPath, wavOutputPath)
+        if not renameOk then
+            local src = io.open(tempWavPath, "rb")
+            local dst = io.open(wavOutputPath, "wb")
+            if src and dst then
+                dst:write(src:read("*a") or "")
+                src:close()
+                dst:close()
+                os.remove(tempWavPath)
+                renameOk = true
+            else
+                if src then src:close() end
+                if dst then dst:close() end
+            end
+        end
+        local wavSize = GetFileSize(wavOutputPath)
+        if renameOk and wavSize >= MIN_PREVIEW_OUTPUT_BYTES then
+            local _, _, wavFileName = SplitOutputPath(wavOutputPath)
+            local outputDir = GetDirectoryPath(outputPath)
+            UpdatePreviewAudioMetadata(outputDir, wavFileName)
+            Diag("preview_wav_fallback_success", {
+                wav_path = tostring(wavOutputPath or ""),
+                output_size_bytes = tostring(wavSize),
+                preview_audio = tostring(wavFileName or "")
+            })
+            return true
+        end
+        Diag("preview_wav_fallback_failed", {
+            wav_path = tostring(wavOutputPath or ""),
+            output_size_bytes = tostring(wavSize),
+            rename_ok = tostring(renameOk)
+        })
+        os.remove(tempWavPath)
         return false
     end
 
@@ -3481,7 +3665,8 @@ function ExportCapsule()
             mode = "current-project-inline",
             capsule_name = tostring(capsuleName or ""),
             preview_path = tostring(previewOutputPath or ""),
-            output_dir = tostring(outputDir or "")
+            output_dir = tostring(outputDir or ""),
+            has_midi_items = tostring(hasMidiItems)
         })
         reaper.ShowConsoleMsg("\n=== inline current-project preview render ===\n")
 
