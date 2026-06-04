@@ -56,7 +56,7 @@ jobs:
           pip install pyinstaller
           pyinstaller flask-backend.spec --noconfirm
           New-Item -ItemType Directory -Force src-tauri/binaries
-          Copy-Item dist/flask-backend.exe src-tauri/binaries/flask-backend.exe
+          Copy-Item dist/flask-backend/flask-backend.exe src-tauri/binaries/flask-backend.exe
 
       - name: Build Tauri app
         run: npx --prefix webapp tauri build
@@ -82,7 +82,7 @@ jobs:
           if (-not $appExe) { throw "Cannot find built Capsule LAN executable." }
           Copy-Item $appExe "$packageDir/Capsule LAN.exe"
           # Flask 后端 sidecar
-          Copy-Item dist/flask-backend.exe "$packageDir/"
+          Copy-Item -Recurse dist/flask-backend/* "$packageDir/"
           # 自更新器
           $updaterExe = @(
             "tools/capsule-updater/target/release/capsule-updater.exe",
