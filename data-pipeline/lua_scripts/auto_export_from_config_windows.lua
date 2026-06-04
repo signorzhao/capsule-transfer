@@ -105,6 +105,288 @@ local function WriteResult(success, capsule_name, error_msg)
     end
 end
 
+local function InstallDirect42230PreviewRenderHotfix()
+    -- v0.7.3 hotfix:
+    -- The inline-preview-render branch previously tried RenderProject_Table and
+    -- RenderProject before falling back to action 42230. On some WAV/audio-item
+    -- projects those API attempts can leave an empty OGG at the output path; the
+    -- fallback then only checks that the file exists and reports success. This
+    -- override keeps Capsule's deterministic render settings and track isolation,
+    -- but renders directly via Main_OnCommand(42230).
+    local OGG_RENDER_CONFIG = "dmdnbwAAAD8AgAAAAIAAAAAgAAAAAAEAAA=="
+
+    local function get_dir(path)
+        return tostring(path or ""):match("(.+)\\[^\\]+$") or tostring(path or ""):match("(.+)/[^/]+$") or ""
+    end
+
+    local function split_output_path(path)
+        local dir = get_dir(path)
+        local name = tostring(path or ""):match("[^/\\]+$") or ""
+        local base = name:gsub("%.[^%.]+$", "")
+        return dir, base, name
+    end
+
+    local function make_dir(path)
+        if not path or path == "" then return end
+        os.execute('if not exist "' .. path:gsub("/", "\\") .. '" mkdir "' .. path:gsub("/", "\\") .. '"')
+    end
+
+    local function file_size(path)
+        local f = io.open(path, "rb")
+        if not f then return 0 end
+        local size = f:seek("end") or 0
+        f:close()
+        return size
+    end
+
+    local function get_str(key)
+        local _, value = reaper.GetSetProjectInfo_String(0, key, "", false)
+        return value or ""
+    end
+
+    local function set_str(key, value)
+        reaper.GetSetProjectInfo_String(0, key, value or "", true)
+    end
+
+    local function get_num(key)
+        return reaper.GetSetProjectInfo(0, key, 0, false) or 0
+    end
+
+    local function set_num(key, value)
+        reaper.GetSetProjectInfo(0, key, value or 0, true)
+    end
+
+    local function add_track_to_set(set, track)
+        if track and type(track) == "userdata" then
+            set[track] = true
+        end
+    end
+
+    local function add_parent_tracks_to_set(set, track)
+        local parent = track and reaper.GetParentTrack(track) or nil
+        while parent do
+            add_track_to_set(set, parent)
+            parent = reaper.GetParentTrack(parent)
+        end
+    end
+
+    local function add_folder_children_to_set(set, track)
+        if not track then return end
+        local folder_depth = reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH")
+        if folder_depth ~= 1 then return end
+        local start_idx = reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER")
+        local depth = 1
+        for i = start_idx, reaper.CountTracks(0) - 1 do
+            local child = reaper.GetTrack(0, i)
+            if not child then break end
+            add_track_to_set(set, child)
+            depth = depth + reaper.GetMediaTrackInfo_Value(child, "I_FOLDERDEPTH")
+            if depth <= 0 then break end
+        end
+    end
+
+    local function add_send_related_tracks_to_set(set)
+        local changed = true
+        while changed do
+            changed = false
+            for track, _ in pairs(set) do
+                local send_count = reaper.GetTrackNumSends(track, 0) or 0
+                for i = 0, send_count - 1 do
+                    local ok, dest = pcall(reaper.GetTrackSendInfo_Value, track, 0, i, "P_DESTTRACK")
+                    if ok and dest and type(dest) == "userdata" and not set[dest] then
+                        set[dest] = true
+                        changed = true
+                    end
+                end
+                local receive_count = reaper.GetTrackNumSends(track, -1) or 0
+                for i = 0, receive_count - 1 do
+                    local ok, src = pcall(reaper.GetTrackSendInfo_Value, track, -1, i, "P_SRCTRACK")
+                    if ok and src and type(src) == "userdata" and not set[src] then
+                        set[src] = true
+                        changed = true
+                    end
+                end
+            end
+        end
+    end
+
+    local function build_selected_item_render_track_set()
+        local set = {}
+        for i = 0, reaper.CountSelectedMediaItems(0) - 1 do
+            local item = reaper.GetSelectedMediaItem(0, i)
+            local track = item and reaper.GetMediaItemTrack(item) or nil
+            add_track_to_set(set, track)
+            add_parent_tracks_to_set(set, track)
+            add_folder_children_to_set(set, track)
+        end
+        add_send_related_tracks_to_set(set)
+        return set
+    end
+
+    local function capture_project_state()
+        local state = { strings = {}, numbers = {}, tracks = {}, items = {} }
+        local string_keys = { "RENDER_FILE", "RENDER_PATTERN", "RENDER_FORMAT", "RENDER_FORMAT2", "RENDER_METADATA", "RENDER_TARGETS" }
+        local number_keys = {
+            "RENDER_RANGE", "RENDER_SETTINGS", "RENDER_BOUNDSFLAG", "RENDER_STEMS", "RENDER_1X", "RENDER_SRATE",
+            "RENDER_CHANNELS", "RENDER_TAILFLAG", "RENDER_TAILMS", "RENDER_ADDTOPROJ", "RENDER_DITHER", "RENDER_TRIM",
+            "RENDER_FADEIN", "RENDER_FADEOUT", "RENDER_NORMALIZE", "RENDER_NORMALIZE_TARGET", "RENDER_BRICKWALL"
+        }
+        for _, key in ipairs(string_keys) do state.strings[key] = get_str(key) end
+        for _, key in ipairs(number_keys) do state.numbers[key] = get_num(key) end
+        state.time_start, state.time_end = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+        state.loop_start, state.loop_end = reaper.GetSet_LoopTimeRange(false, true, 0, 0, false)
+        state.cursor = reaper.GetCursorPosition()
+        for i = 0, reaper.CountTracks(0) - 1 do
+            local track = reaper.GetTrack(0, i)
+            if track then
+                local ok, chunk = reaper.GetTrackStateChunk(track, "", false)
+                table.insert(state.tracks, { track = track, chunk = ok and chunk or nil, solo = reaper.GetMediaTrackInfo_Value(track, "I_SOLO"), mute = reaper.GetMediaTrackInfo_Value(track, "B_MUTE") })
+            end
+        end
+        for ti = 0, reaper.CountTracks(0) - 1 do
+            local track = reaper.GetTrack(0, ti)
+            if track then
+                for ii = 0, reaper.CountTrackMediaItems(track) - 1 do
+                    local item = reaper.GetTrackMediaItem(track, ii)
+                    if item then
+                        table.insert(state.items, { item = item, selected = reaper.IsMediaItemSelected(item) })
+                    end
+                end
+            end
+        end
+        return state
+    end
+
+    local function restore_project_state(state)
+        if not state then return end
+        reaper.PreventUIRefresh(1)
+        for _, entry in ipairs(state.tracks or {}) do
+            if entry.track then
+                if entry.chunk then
+                    pcall(reaper.SetTrackStateChunk, entry.track, entry.chunk, false)
+                else
+                    pcall(reaper.SetMediaTrackInfo_Value, entry.track, "I_SOLO", entry.solo or 0)
+                    pcall(reaper.SetMediaTrackInfo_Value, entry.track, "B_MUTE", entry.mute or 0)
+                end
+            end
+        end
+        for _, entry in ipairs(state.items or {}) do
+            if entry.item then
+                pcall(reaper.SetMediaItemSelected, entry.item, entry.selected == true)
+            end
+        end
+        for key, value in pairs(state.strings or {}) do pcall(set_str, key, value) end
+        for key, value in pairs(state.numbers or {}) do pcall(set_num, key, value) end
+        pcall(reaper.GetSet_LoopTimeRange, true, false, state.time_start or 0, state.time_end or 0, false)
+        pcall(reaper.GetSet_LoopTimeRange, true, true, state.loop_start or 0, state.loop_end or 0, false)
+        if state.cursor then pcall(reaper.SetEditCurPos, state.cursor, false, false) end
+        pcall(reaper.UpdateArrange)
+        reaper.PreventUIRefresh(-1)
+    end
+
+    local function apply_inline_preview_track_isolation(track_set)
+        local selected_count = 0
+        for _ in pairs(track_set or {}) do selected_count = selected_count + 1 end
+        if selected_count == 0 then return 0 end
+        for i = 0, reaper.CountTracks(0) - 1 do
+            local track = reaper.GetTrack(0, i)
+            if track then reaper.SetMediaTrackInfo_Value(track, "I_SOLO", 0) end
+        end
+        for track, _ in pairs(track_set) do
+            reaper.SetMediaTrackInfo_Value(track, "B_MUTE", 0)
+            reaper.SetMediaTrackInfo_Value(track, "I_SOLO", 2)
+        end
+        return selected_count
+    end
+
+    local function diag(event, fields)
+        if diagnostic_logger and diagnostic_logger.write then
+            pcall(diagnostic_logger.write, event, fields or {})
+        end
+    end
+
+    RenderPreviewAudioFromCurrentProject = function(outputPath, startTime, endTime, hasMidiItems)
+        local previewStartTime, previewEndTime = startTime, endTime
+        local renderDir, renderBase = split_output_path(outputPath)
+        if renderDir == "" or renderBase == "" then
+            return false
+        end
+        make_dir(renderDir)
+        os.remove(outputPath)
+
+        local state = capture_project_state()
+        local track_set = build_selected_item_render_track_set()
+        local isolated_count = 0
+        local renderOk = false
+        local renderRet = ""
+
+        local ok, err = pcall(function()
+            BridgePhase("rendering preview: preparing current project")
+            reaper.PreventUIRefresh(1)
+            isolated_count = apply_inline_preview_track_isolation(track_set)
+            reaper.PreventUIRefresh(-1)
+
+            reaper.GetSet_LoopTimeRange(true, false, previewStartTime, previewEndTime, false)
+            reaper.GetSet_LoopTimeRange(true, true, previewStartTime, previewEndTime, false)
+            set_str("RENDER_FILE", renderDir)
+            set_str("RENDER_PATTERN", renderBase)
+            set_str("RENDER_FORMAT", OGG_RENDER_CONFIG)
+            set_num("RENDER_RANGE", 1)
+            set_num("RENDER_BOUNDSFLAG", 2)
+            set_num("RENDER_STEMS", 0)
+            set_num("RENDER_1X", hasMidiItems and 2 or 0)
+            set_num("RENDER_SETTINGS", 0)
+            set_num("RENDER_TAILFLAG", 0)
+            set_num("RENDER_TAILMS", 0)
+            set_num("RENDER_ADDTOPROJ", 0)
+            set_num("RENDER_DITHER", 0)
+            set_num("RENDER_TRIM", 0)
+            set_num("RENDER_FADEIN", 0)
+            set_num("RENDER_FADEOUT", 0)
+            set_num("RENDER_NORMALIZE", 0)
+            set_num("RENDER_NORMALIZE_TARGET", 0)
+            set_num("RENDER_BRICKWALL", 0)
+            reaper.UpdateArrange()
+
+            diag("inline_render_settings_applied", {
+                output = tostring(outputPath or ""),
+                render_file = tostring(renderDir or ""),
+                render_pattern = tostring(renderBase or ""),
+                boundsflag = tostring(get_num("RENDER_BOUNDSFLAG")),
+                start_time = tostring(previewStartTime),
+                end_time = tostring(previewEndTime),
+                direct_42230 = "true",
+                skipped_renderproject_api = "true"
+            })
+
+            BridgePhase("rendering preview: rendering current project")
+            os.remove(outputPath)
+            reaper.Main_OnCommand(42230, 0)
+            local size = file_size(outputPath)
+            renderOk = size > 0
+            renderRet = "direct_42230; output_size=" .. tostring(size)
+            diag("inline_render_api_result", {
+                method = "direct_Main_OnCommand_42230",
+                result = renderRet,
+                output = tostring(outputPath or ""),
+                isolated_tracks = tostring(isolated_count)
+            })
+        end)
+
+        restore_project_state(state)
+
+        if not ok then
+            diag("inline_render_api_failed", { method = "direct_Main_OnCommand_42230", error = tostring(err or ""), isolated_tracks = tostring(isolated_count) })
+            return false
+        end
+        if not renderOk then
+            diag("inline_render_api_failed", { method = "direct_Main_OnCommand_42230", last_result = renderRet, output = tostring(outputPath or ""), isolated_tracks = tostring(isolated_count) })
+            return false
+        end
+        return true
+    end
+end
+
 local function Main()
     Log("=== [Windows 自动导出脚本启动] ===\n")
     Log("时间戳: " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n")
@@ -202,6 +484,9 @@ local function Main()
         return
     end
     Log("✓ 脚本加载完成\n")
+
+    InstallDirect42230PreviewRenderHotfix()
+    Log("✓ 已启用 direct 42230 preview render hotfix\n")
 
     -- 用 pcall 执行 main 函数
     Log("调用 main() 函数...\n")
