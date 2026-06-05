@@ -655,6 +655,9 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
   const [createParentId, setCreateParentId] = useState(null);
   const [newFolderName, setNewFolderName] = useState('');
   const [folderError, setFolderError] = useState('');
+  const [editingFolderId, setEditingFolderId] = useState(null);
+  const [folderEditName, setFolderEditName] = useState('');
+  const [deleteConfirmFolderId, setDeleteConfirmFolderId] = useState(null);
   const [draggingId, setDraggingId] = useState(null);
   const [draggingFolderId, setDraggingFolderId] = useState(null);
   const [dragOverFolder, setDragOverFolder] = useState(null);
@@ -730,23 +733,6 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
     }
   };
 
-  const addCapsuleToDefaultFolder = async (capsuleId) => {
-    if (!capsuleId || customFolders.length > 0) return;
-    try {
-      setFolderError('');
-      const res = await api.createCapsuleFolder('默认分类', null);
-      const folder = res.data || res;
-      await api.addCapsuleToFolder(folder.id, capsuleId);
-      await refreshCustomFolders();
-      setSelectedFolder(`folder:${folder.id}`);
-    } catch (err) {
-      setFolderError(`加入分类失败：${err.message}`);
-    } finally {
-      setDragOverFolder(null);
-      setDraggingId(null);
-    }
-  };
-
   const moveFolder = async (folderId, parentId) => {
     if (!folderId || folderId === parentId) return;
     try {
@@ -758,6 +744,50 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
     } finally {
       setDraggingFolderId(null);
       setDragOverFolder(null);
+    }
+  };
+
+  const startRenameFolder = (folder) => {
+    if (!folder?.id) return;
+    setEditingFolderId(folder.id);
+    setFolderEditName(folder.label || '');
+    setDeleteConfirmFolderId(null);
+  };
+
+  const cancelRenameFolder = () => {
+    setEditingFolderId(null);
+    setFolderEditName('');
+  };
+
+  const confirmRenameFolder = async (folder) => {
+    const name = folderEditName.trim();
+    if (!folder?.id || !name) return;
+    try {
+      setFolderError('');
+      if (name !== folder.label) {
+        await api.updateCapsuleFolder(folder.id, { name });
+        await refreshCustomFolders();
+      }
+      cancelRenameFolder();
+    } catch (err) {
+      setFolderError(`重命名分类失败：${err.message}`);
+    }
+  };
+
+  const deleteFolder = async (folder) => {
+    if (!folder?.id) return;
+    try {
+      setFolderError('');
+      const deletedIds = new Set([folder.id, ...(descendantIdsByFolderId.get(folder.id) || [])]);
+      await api.deleteCapsuleFolder(folder.id);
+      await refreshCustomFolders();
+      if (selectedFolder.startsWith('folder:') && deletedIds.has(selectedFolder.slice('folder:'.length))) {
+        setSelectedFolder('all');
+      }
+      if (editingFolderId && deletedIds.has(editingFolderId)) cancelRenameFolder();
+      setDeleteConfirmFolderId(null);
+    } catch (err) {
+      setFolderError(`删除分类失败：${err.message}`);
     }
   };
 
@@ -878,7 +908,6 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
         count: customFolders.length,
         selectable: false,
         acceptsFolderDrop: true,
-        acceptsCapsuleDrop: customFolders.length === 0,
         children: customItems,
       },
       { key: 'all', label: '全部胶囊', icon: Package, count: capsules.length, predicate: () => true },
@@ -959,17 +988,28 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
     const active = selectedFolder === folder.key;
     const hasChildren = Boolean(folder.children?.length);
     const canSelect = folder.selectable !== false;
-    const canDropCapsule = Boolean(folder.droppable || folder.acceptsCapsuleDrop);
+    const canDropCapsule = Boolean(folder.droppable);
     const canDropFolder = Boolean(folder.droppable || folder.acceptsFolderDrop);
     const isDragOver = dragOverFolder === folder.key;
     const folderDropTargetId = folder.acceptsFolderDrop ? null : folder.id;
+    const isEditingFolder = folder.droppable && editingFolderId === folder.id;
+    const isConfirmingDelete = folder.droppable && deleteConfirmFolderId === folder.id;
     return (
       <div key={folder.key}>
-        <button
+        <div
+          role="button"
+          tabIndex={canSelect ? 0 : -1}
           onClick={() => { if (canSelect) setSelectedFolder(folder.key); }}
-          draggable={Boolean(folder.draggableFolder)}
+          onKeyDown={(event) => {
+            if (!canSelect) return;
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              setSelectedFolder(folder.key);
+            }
+          }}
+          draggable={Boolean(folder.draggableFolder) && !isEditingFolder && !isConfirmingDelete}
           onDragStart={(event) => {
-            if (!folder.draggableFolder) return;
+            if (!folder.draggableFolder || isEditingFolder || isConfirmingDelete) return;
             event.stopPropagation();
             setDraggingFolderId(folder.id);
             event.dataTransfer.effectAllowed = 'move';
@@ -978,7 +1018,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
           }}
           onDragOver={(event) => {
             const dragTypes = Array.from(event.dataTransfer.types || []);
-            const hasCapsule = dragTypes.includes('application/x-capsule-id') || dragTypes.includes('text/plain') || Boolean(draggingId);
+            const hasCapsule = dragTypes.includes('application/x-capsule-id') || Boolean(draggingId);
             const hasFolder = dragTypes.includes('application/x-capsule-folder-id') || Boolean(draggingFolderId);
             if ((!hasCapsule || !canDropCapsule) && (!hasFolder || !canDropFolder)) return;
             event.preventDefault();
@@ -990,6 +1030,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
           }}
           onDrop={(event) => {
             event.preventDefault();
+            event.stopPropagation();
             const plainValue = event.dataTransfer.getData('text/plain');
             const droppedFolderId = event.dataTransfer.getData('application/x-capsule-folder-id') || draggingFolderId || (plainValue?.startsWith('folder:') ? plainValue.slice('folder:'.length) : '');
             if (droppedFolderId && canDropFolder) {
@@ -998,8 +1039,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
             }
             const capsuleId = draggingId || event.dataTransfer.getData('application/x-capsule-id') || (plainValue?.startsWith('capsule:') ? plainValue.slice('capsule:'.length) : plainValue);
             if (capsuleId && canDropCapsule) {
-              if (folder.droppable) addToFolder(folder.id, capsuleId);
-              else if (folder.acceptsCapsuleDrop) addCapsuleToDefaultFolder(capsuleId);
+              addToFolder(folder.id, capsuleId);
             }
           }}
           onDragEnd={() => {
@@ -1010,10 +1050,87 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
           }}
           className={`group/folder w-full h-9 px-2 rounded-lg flex items-center gap-2 text-left transition-colors ${active ? 'bg-indigo-500/15 border border-indigo-500/35 text-indigo-100' : isDragOver ? 'border border-indigo-500/50 bg-indigo-500/10 text-indigo-100' : canSelect ? 'border border-transparent text-slate-400 hover:bg-slate-800/70 hover:text-slate-200' : 'border border-transparent text-slate-500'}`}
           style={{ paddingLeft: `${8 + depth * 18}px` }}
-        >
+          >
           {hasChildren ? <ChevronDown size={14} className="text-slate-500 shrink-0" /> : <span className="w-3.5 shrink-0" />}
           <Icon size={15} className={active ? 'text-indigo-300 shrink-0' : 'text-slate-500 shrink-0'} />
-          <span className="min-w-0 flex-1 truncate text-sm">{folder.label}</span>
+          {isEditingFolder ? (
+            <input
+              autoFocus
+              value={folderEditName}
+              onClick={(event) => event.stopPropagation()}
+              onChange={(event) => setFolderEditName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  confirmRenameFolder(folder);
+                }
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  cancelRenameFolder();
+                }
+              }}
+              className="min-w-0 flex-1 rounded border border-indigo-500/60 bg-[#0f1115] px-1.5 py-0.5 text-sm text-slate-100 focus:outline-none"
+            />
+          ) : (
+            <span className="min-w-0 flex-1 truncate text-sm">{folder.label}</span>
+          )}
+          {isEditingFolder ? (
+            <span className="flex shrink-0 items-center gap-1">
+              <span
+                role="button"
+                tabIndex={0}
+                title="保存分类名称"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  confirmRenameFolder(folder);
+                }}
+                className="rounded p-1 text-emerald-400 hover:bg-emerald-500/10"
+              >
+                <Check size={13} />
+              </span>
+              <span
+                role="button"
+                tabIndex={0}
+                title="取消重命名"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  cancelRenameFolder();
+                }}
+                className="rounded p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-200"
+              >
+                <X size={13} />
+              </span>
+            </span>
+          ) : isConfirmingDelete ? (
+            <span className="flex shrink-0 items-center gap-1">
+              <span
+                role="button"
+                tabIndex={0}
+                title="确认删除分类，不删除胶囊"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  deleteFolder(folder);
+                }}
+                className="rounded bg-red-500/20 px-1.5 py-0.5 text-[11px] text-red-200 hover:bg-red-500 hover:text-white"
+              >
+                删除
+              </span>
+              <span
+                role="button"
+                tabIndex={0}
+                title="取消删除"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setDeleteConfirmFolderId(null);
+                }}
+                className="rounded p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-200"
+              >
+                <X size={13} />
+              </span>
+            </span>
+          ) : null}
           {(folder.key === 'custom-root' || folder.droppable) && (
             <span
               role="button"
@@ -1035,8 +1152,37 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
               <FolderPlus size={13} />
             </span>
           )}
+          {folder.droppable && !isEditingFolder && !isConfirmingDelete && (
+            <>
+              <span
+                role="button"
+                tabIndex={0}
+                title="重命名分类"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  startRenameFolder(folder);
+                }}
+                className="opacity-0 group-hover/folder:opacity-100 rounded p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-200"
+              >
+                <Pencil size={13} />
+              </span>
+              <span
+                role="button"
+                tabIndex={0}
+                title="删除分类，不删除胶囊"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setDeleteConfirmFolderId(folder.id);
+                  cancelRenameFolder();
+                }}
+                className="opacity-0 group-hover/folder:opacity-100 rounded p-1 text-slate-500 hover:bg-red-500/10 hover:text-red-300"
+              >
+                <Trash2 size={13} />
+              </span>
+            </>
+          )}
           <span className="text-[11px] text-slate-500">{folder.count}</span>
-        </button>
+        </div>
         {hasChildren && (
           <div className="mt-1 space-y-1">
             {folder.children.map((child) => renderFolder(child, depth + 1))}
@@ -1112,6 +1258,14 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
             )}
             <div className="space-y-1 overflow-y-auto custom-scrollbar pr-1">
               {folderTree.map((folder) => renderFolder(folder))}
+              {customFolders.length === 0 && (
+                <button
+                  onClick={() => startCreateFolder(null)}
+                  className="mt-2 w-full rounded-lg border border-dashed border-slate-700 px-3 py-2 text-left text-xs text-slate-500 hover:border-indigo-500/50 hover:bg-indigo-500/10 hover:text-indigo-200"
+                >
+                  先新建一个分类，然后把胶囊拖到该分类里
+                </button>
+              )}
             </div>
             {folderError && <div className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] leading-relaxed text-red-200">{folderError}</div>}
             <div className="mt-auto pt-4 text-[11px] leading-relaxed text-slate-600">

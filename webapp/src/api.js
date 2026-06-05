@@ -112,6 +112,8 @@ export const api = {
     jsonFetch('/capsule-folders', { method: 'POST', body: JSON.stringify({ name, parent_id: parentId }) }),
   updateCapsuleFolder: (folderId, payload) =>
     jsonFetch(`/capsule-folders/${encodeURIComponent(folderId)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteCapsuleFolder: (folderId) =>
+    jsonFetch(`/capsule-folders/${encodeURIComponent(folderId)}`, { method: 'DELETE' }),
   addCapsuleToFolder: (folderId, capsuleId) =>
     jsonFetch(`/capsule-folders/${encodeURIComponent(folderId)}/capsules`, { method: 'POST', body: JSON.stringify({ capsule_id: capsuleId }) }),
   removeCapsuleFromFolder: (folderId, capsuleId) =>

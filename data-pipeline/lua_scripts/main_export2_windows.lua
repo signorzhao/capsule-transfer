@@ -1077,72 +1077,37 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, ha
             end_time = tostring(previewEndTime)
         })
         BridgePhase("rendering preview: rendering current project")
-        local renderMethod = "none"
+        local renderMethod = "direct_Main_OnCommand_42230"
         local renderRet = ""
-        if reaper.RenderProject_Table then
-            renderMethod = "RenderProject_Table"
-            local success, ret = reaper.RenderProject_Table(
-                nil,
-                2,
-                previewStartTime,
-                previewEndTime,
-                1.0,
-                renderPath,
-                0,
-                0,
-                false
-            )
-            renderOk = (success == true and ret ~= false)
-            renderRet = "success=" .. tostring(success) .. "; ret=" .. tostring(ret)
-            reaper.ShowConsoleMsg("  RenderProject_Table: " .. renderRet .. "\n")
-            Diag("inline_render_api_result", {
-                method = renderMethod,
-                result = renderRet,
-                output = tostring(renderPath or "")
-            })
+        reaper.GetSet_LoopTimeRange(true, false, previewStartTime, previewEndTime, false)
+        reaper.GetSet_LoopTimeRange(true, true, previewStartTime, previewEndTime, false)
+        SetProjectNumericInfo("RENDER_BOUNDSFLAG", 2)
+        SetProjectNumericInfo("RENDER_RANGE", 1)
+        reaper.UpdateArrange()
+        reaper.Main_OnCommand(40101, 0)  -- Item: Set all media online.
+        forcedMediaOnline = true
+        Diag("preview_force_media_online", {
+            command_id = "40101",
+            timing = "immediately_before_42230"
+        })
+        os.remove(renderPath)
+        reaper.Main_OnCommand(42230, 0)  -- Render with the current project's temporary preview settings.
+        local minRenderBytes = string.match(renderPath, "%.ogg$") and 1 or MIN_PREVIEW_OUTPUT_BYTES
+        local outputSize = WaitForStableFileSize(renderPath, minRenderBytes, 500, 10000)
+        if outputSize >= minRenderBytes then
+            renderOk = true
+            renderRet = "output_exists=true; output_size_bytes=" .. tostring(outputSize)
+        else
+            renderRet = "output_exists=" .. tostring(outputSize > 0) .. "; output_size_bytes=" .. tostring(outputSize)
         end
-        if not renderOk and reaper.RenderProject then
-            renderMethod = "RenderProject"
-            local ret = reaper.RenderProject(nil, false, false, renderPath)
-            renderOk = tonumber(ret or 0) > 0
-            renderRet = "ret=" .. tostring(ret)
-            reaper.ShowConsoleMsg("  RenderProject fallback: " .. renderRet .. "\n")
-            Diag("inline_render_api_result", {
-                method = renderMethod,
-                result = renderRet,
-                output = tostring(renderPath or "")
-            })
-        end
-        if not renderOk then
-            renderMethod = "current_project_settings_then_Main_OnCommand_42230"
-            reaper.GetSet_LoopTimeRange(true, false, previewStartTime, previewEndTime, false)
-            reaper.GetSet_LoopTimeRange(true, true, previewStartTime, previewEndTime, false)
-            SetProjectNumericInfo("RENDER_BOUNDSFLAG", 2)
-            SetProjectNumericInfo("RENDER_RANGE", 1)
-            reaper.UpdateArrange()
-            reaper.Main_OnCommand(40101, 0)  -- Item: Set all media online.
-            forcedMediaOnline = true
-            Diag("preview_force_media_online", {
-                command_id = "40101",
-                timing = "immediately_before_42230"
-            })
-            reaper.Main_OnCommand(42230, 0)  -- Render with the current project's temporary preview settings.
-            local minRenderBytes = string.match(renderPath, "%.ogg$") and 1 or MIN_PREVIEW_OUTPUT_BYTES
-            local outputSize = WaitForStableFileSize(renderPath, minRenderBytes, 500, 10000)
-            if outputSize >= minRenderBytes then
-                renderOk = true
-                renderRet = "output_exists=true; output_size_bytes=" .. tostring(outputSize)
-            else
-                renderRet = "output_exists=" .. tostring(outputSize > 0) .. "; output_size_bytes=" .. tostring(outputSize)
-            end
-            reaper.ShowConsoleMsg("  Render 42230 fallback: " .. renderRet .. "\n")
-            Diag("inline_render_api_result", {
-                method = renderMethod,
-                result = renderRet,
-                output = tostring(renderPath or ""),
-                output_size_bytes = tostring(outputSize)
-            })
-        end
+        reaper.ShowConsoleMsg("  Render 42230 direct: " .. renderRet .. "\n")
+        Diag("inline_render_api_result", {
+            method = renderMethod,
+            result = renderRet,
+            output = tostring(renderPath or ""),
+            output_size_bytes = tostring(outputSize),
+            skipped_renderproject_api = "true"
+        })
         if not renderOk then
             Diag("inline_render_api_failed", {
                 last_method = tostring(renderMethod),

@@ -846,6 +846,22 @@ def _is_descendant_folder(data: dict, folder_id: str, maybe_descendant_id: str |
     return False
 
 
+def _folder_with_descendants(data: dict, folder_id: str) -> set[str]:
+    children_by_parent = {}
+    for folder in data["folders"]:
+        parent_id = folder.get("parent_id")
+        children_by_parent.setdefault(parent_id, []).append(folder["id"])
+    result = set()
+    stack = [folder_id]
+    while stack:
+        current = stack.pop()
+        if current in result:
+            continue
+        result.add(current)
+        stack.extend(children_by_parent.get(current, []))
+    return result
+
+
 def _cleanup_capsule_folder_memberships(cap_id: str):
     data = _load_capsule_folders()
     changed = False
@@ -1176,6 +1192,19 @@ def update_capsule_folder(folder_id: str):
     folder["updated_at"] = _now_iso()
     _save_capsule_folders(data)
     return _ok(_folder_response(folder, data["memberships"]), message="分类已更新")
+
+
+@app.route("/api/capsule-folders/<folder_id>", methods=["DELETE"])
+def delete_capsule_folder(folder_id: str):
+    data = _load_capsule_folders()
+    if not any(item["id"] == folder_id for item in data["folders"]):
+        return _err("分类不存在", 404)
+    delete_ids = _folder_with_descendants(data, folder_id)
+    data["folders"] = [item for item in data["folders"] if item["id"] not in delete_ids]
+    for delete_id in delete_ids:
+        data["memberships"].pop(delete_id, None)
+    _save_capsule_folders(data)
+    return _ok({"deleted_ids": sorted(delete_ids)}, message="分类已删除")
 
 
 @app.route("/api/capsule-folders/<folder_id>/capsules", methods=["POST"])
