@@ -148,6 +148,30 @@ fn resolve_update_path(latest_path: &Path, package_url: &str) -> PathBuf {
         .join(package_path)
 }
 
+fn is_http_url(value: &str) -> bool {
+    let value = value.trim().to_lowercase();
+    value.starts_with("http://") || value.starts_with("https://")
+}
+
+fn resolve_update_location(latest_source: &str, package_url: &str) -> String {
+    let raw = package_url.trim();
+    if is_http_url(raw) {
+        return raw.to_string();
+    }
+    if is_http_url(latest_source) {
+        let base = latest_source
+            .trim()
+            .rsplit_once('/')
+            .map(|(prefix, _)| prefix)
+            .unwrap_or_else(|| latest_source.trim())
+            .trim_end_matches('/');
+        return format!("{}/{}", base, raw.trim_start_matches('/'));
+    }
+    resolve_update_path(Path::new(latest_source.trim()), raw)
+        .to_string_lossy()
+        .to_string()
+}
+
 fn normalized_source(value: &Path) -> String {
     let text = value.to_string_lossy().replace('/', "\\");
     #[cfg(target_os = "windows")]
@@ -158,6 +182,10 @@ fn normalized_source(value: &Path) -> String {
     {
         text
     }
+}
+
+fn normalized_url(value: &str) -> String {
+    value.trim().to_lowercase()
 }
 
 fn source_allowed(latest_path: &Path, package_path: &Path, prefixes: &[String]) -> bool {
@@ -177,6 +205,31 @@ fn source_allowed(latest_path: &Path, package_path: &Path, prefixes: &[String]) 
         .unwrap_or(false)
 }
 
+fn source_allowed_location(latest_source: &str, package_location: &str, prefixes: &[String]) -> bool {
+    if is_http_url(package_location) {
+        let package = normalized_url(package_location);
+        if !prefixes.is_empty() {
+            return prefixes
+                .iter()
+                .any(|prefix| package.starts_with(&normalized_url(prefix)));
+        }
+        if is_http_url(latest_source) {
+            return latest_source
+                .trim()
+                .rsplit_once('/')
+                .map(|(prefix, _)| package.starts_with(&normalized_url(prefix)))
+                .unwrap_or(false);
+        }
+        return false;
+    }
+
+    source_allowed(
+        Path::new(latest_source.trim()),
+        Path::new(package_location.trim()),
+        prefixes,
+    )
+}
+
 fn sha256_file(path: &Path) -> io::Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
@@ -191,8 +244,72 @@ fn sha256_file(path: &Path) -> io::Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn read_manifest(latest_path: &Path) -> Result<LatestManifest, String> {
-    let raw = fs::read_to_string(latest_path).map_err(|e| format!("读取 latest.json 失败：{e}"))?;
+fn file_name_from_location(location: &str) -> Option<String> {
+    if is_http_url(location) {
+        let path = location
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(location)
+            .trim_end_matches('/');
+        return path.rsplit('/').next().map(|value| value.to_string());
+    }
+    Path::new(location)
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+}
+
+fn download_http_to_file(url: &str, dest: &Path) -> Result<(), String> {
+    let _ = fs::remove_file(dest);
+    let script = concat!(
+        "$ErrorActionPreference = 'Stop'; ",
+        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; ",
+        "Invoke-WebRequest -UseBasicParsing -Uri $args[0] -OutFile $args[1]"
+    );
+    let dest_arg = dest.to_string_lossy().to_string();
+    let mut command = Command::new("powershell.exe");
+    command.args([
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+        url,
+        dest_arg.as_str(),
+    ]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = command
+        .output()
+        .map_err(|e| format!("启动 HTTP 下载失败：{e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            Err("HTTP 下载失败".to_string())
+        } else {
+            Err(format!("HTTP 下载失败：{stderr}"))
+        }
+    }
+}
+
+fn read_manifest_source(latest_source: &str) -> Result<LatestManifest, String> {
+    let raw = if is_http_url(latest_source) {
+        let updates_dir = std::env::temp_dir().join("CapsuleLAN").join("updates");
+        fs::create_dir_all(&updates_dir).map_err(|e| format!("创建临时更新目录失败：{e}"))?;
+        let latest_file = updates_dir.join(format!("latest-{}.json", std::process::id()));
+        download_http_to_file(latest_source, &latest_file)?;
+        let content =
+            fs::read_to_string(&latest_file).map_err(|e| format!("读取 latest.json 内容失败：{e}"))?;
+        let _ = fs::remove_file(latest_file);
+        content
+    } else {
+        fs::read_to_string(Path::new(latest_source))
+            .map_err(|e| format!("读取 latest.json 失败：{e}"))?
+    };
     serde_json::from_str(&raw).map_err(|e| format!("解析 latest.json 失败：{e}"))
 }
 
@@ -345,8 +462,8 @@ fn check_update() -> Result<UpdateCheckResult, String> {
         });
     }
 
-    let latest_path = PathBuf::from(config.latest_path.trim());
-    let manifest = read_manifest(&latest_path)?;
+    let latest_source = config.latest_path.trim().to_string();
+    let manifest = read_manifest_source(&latest_source)?;
     let manifest_channel = if manifest.channel.trim().is_empty() {
         config.channel.clone()
     } else {
@@ -369,14 +486,14 @@ fn check_update() -> Result<UpdateCheckResult, String> {
             package_url: None,
             sha256: None,
             size: None,
-            latest_path: Some(latest_path.to_string_lossy().to_string()),
+            latest_path: Some(latest_source),
             message,
         });
     }
 
     let package = select_package(&manifest)?;
-    let package_path = resolve_update_path(&latest_path, &package.url);
-    if !source_allowed(&latest_path, &package_path, &config.allowed_source_prefixes) {
+    let package_location = resolve_update_location(&latest_source, &package.url);
+    if !source_allowed_location(&latest_source, &package_location, &config.allowed_source_prefixes) {
         return Err("更新包路径不在允许的更新源范围内".to_string());
     }
 
@@ -390,10 +507,10 @@ fn check_update() -> Result<UpdateCheckResult, String> {
         latest_build: Some(manifest.build),
         channel: config.channel,
         notes: manifest.notes,
-        package_url: Some(package_path.to_string_lossy().to_string()),
+        package_url: Some(package_location),
         sha256: Some(package.sha256),
         size: Some(package.size),
-        latest_path: Some(latest_path.to_string_lossy().to_string()),
+        latest_path: Some(latest_source),
         message: if update_available {
             "发现新版本。".to_string()
         } else {
@@ -411,22 +528,25 @@ fn download_update(
 ) -> Result<DownloadedPackage, String> {
     let dir = app_dir()?;
     let config = load_update_config(&dir)?;
-    let latest_path = PathBuf::from(config.latest_path.trim());
-    let package_path = PathBuf::from(package_url.trim());
-    if !source_allowed(&latest_path, &package_path, &config.allowed_source_prefixes) {
+    let latest_source = config.latest_path.trim().to_string();
+    let package_location = package_url.trim().to_string();
+    if !source_allowed_location(&latest_source, &package_location, &config.allowed_source_prefixes) {
         return Err("更新包路径不在允许的更新源范围内".to_string());
     }
-    if !package_path.exists() {
-        return Err(format!("更新包不存在：{}", package_path.to_string_lossy()));
+    if !is_http_url(&package_location) && !Path::new(&package_location).exists() {
+        return Err(format!("更新包不存在：{}", package_location));
     }
 
     let updates_dir = std::env::temp_dir().join("CapsuleLAN").join("updates");
     fs::create_dir_all(&updates_dir).map_err(|e| format!("创建临时更新目录失败：{e}"))?;
-    let filename = package_path
-        .file_name()
+    let filename = file_name_from_location(&package_location)
         .ok_or_else(|| "更新包路径缺少文件名".to_string())?;
     let dest = updates_dir.join(filename);
-    fs::copy(&package_path, &dest).map_err(|e| format!("复制更新包失败：{e}"))?;
+    if is_http_url(&package_location) {
+        download_http_to_file(&package_location, &dest)?;
+    } else {
+        fs::copy(Path::new(&package_location), &dest).map_err(|e| format!("复制更新包失败：{e}"))?;
+    }
 
     let actual_sha = sha256_file(&dest).map_err(|e| format!("计算 SHA256 失败：{e}"))?;
     if !actual_sha.eq_ignore_ascii_case(sha256.trim()) {

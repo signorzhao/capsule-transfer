@@ -675,7 +675,10 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
     let cancelled = false;
     api.listCapsuleFolders()
       .then((res) => {
-        if (!cancelled) setCustomFolders(res.data?.items || []);
+        if (!cancelled) {
+          setCustomFolders(res.data?.items || []);
+          setFolderError('');
+        }
       })
       .catch((err) => {
         if (!cancelled) setFolderError(`读取分类失败：${err.message}`);
@@ -686,6 +689,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
   const refreshCustomFolders = async () => {
     const res = await api.listCapsuleFolders();
     setCustomFolders(res.data?.items || []);
+    setFolderError('');
     return res.data?.items || [];
   };
 
@@ -718,6 +722,23 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
       setFolderError('');
       await api.addCapsuleToFolder(folderId, capsuleId);
       await refreshCustomFolders();
+    } catch (err) {
+      setFolderError(`加入分类失败：${err.message}`);
+    } finally {
+      setDragOverFolder(null);
+      setDraggingId(null);
+    }
+  };
+
+  const addCapsuleToDefaultFolder = async (capsuleId) => {
+    if (!capsuleId || customFolders.length > 0) return;
+    try {
+      setFolderError('');
+      const res = await api.createCapsuleFolder('默认分类', null);
+      const folder = res.data || res;
+      await api.addCapsuleToFolder(folder.id, capsuleId);
+      await refreshCustomFolders();
+      setSelectedFolder(`folder:${folder.id}`);
     } catch (err) {
       setFolderError(`加入分类失败：${err.message}`);
     } finally {
@@ -857,6 +878,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
         count: customFolders.length,
         selectable: false,
         acceptsFolderDrop: true,
+        acceptsCapsuleDrop: customFolders.length === 0,
         children: customItems,
       },
       { key: 'all', label: '全部胶囊', icon: Package, count: capsules.length, predicate: () => true },
@@ -937,7 +959,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
     const active = selectedFolder === folder.key;
     const hasChildren = Boolean(folder.children?.length);
     const canSelect = folder.selectable !== false;
-    const canDropCapsule = Boolean(folder.droppable);
+    const canDropCapsule = Boolean(folder.droppable || folder.acceptsCapsuleDrop);
     const canDropFolder = Boolean(folder.droppable || folder.acceptsFolderDrop);
     const isDragOver = dragOverFolder === folder.key;
     const folderDropTargetId = folder.acceptsFolderDrop ? null : folder.id;
@@ -952,6 +974,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
             setDraggingFolderId(folder.id);
             event.dataTransfer.effectAllowed = 'move';
             event.dataTransfer.setData('application/x-capsule-folder-id', folder.id);
+            event.dataTransfer.setData('text/plain', `folder:${folder.id}`);
           }}
           onDragOver={(event) => {
             const dragTypes = Array.from(event.dataTransfer.types || []);
@@ -967,13 +990,17 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
           }}
           onDrop={(event) => {
             event.preventDefault();
-            const droppedFolderId = event.dataTransfer.getData('application/x-capsule-folder-id') || draggingFolderId;
+            const plainValue = event.dataTransfer.getData('text/plain');
+            const droppedFolderId = event.dataTransfer.getData('application/x-capsule-folder-id') || draggingFolderId || (plainValue?.startsWith('folder:') ? plainValue.slice('folder:'.length) : '');
             if (droppedFolderId && canDropFolder) {
               moveFolder(droppedFolderId, folderDropTargetId);
               return;
             }
-            const capsuleId = event.dataTransfer.getData('application/x-capsule-id') || event.dataTransfer.getData('text/plain') || draggingId;
-            if (capsuleId && canDropCapsule) addToFolder(folder.id, capsuleId);
+            const capsuleId = draggingId || event.dataTransfer.getData('application/x-capsule-id') || (plainValue?.startsWith('capsule:') ? plainValue.slice('capsule:'.length) : plainValue);
+            if (capsuleId && canDropCapsule) {
+              if (folder.droppable) addToFolder(folder.id, capsuleId);
+              else if (folder.acceptsCapsuleDrop) addCapsuleToDefaultFolder(capsuleId);
+            }
           }}
           onDragEnd={() => {
             if (folder.draggableFolder) {
@@ -1120,7 +1147,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
                       setDraggingId(cap.id);
                       event.dataTransfer.effectAllowed = 'copy';
                       event.dataTransfer.setData('application/x-capsule-id', cap.id);
-                      event.dataTransfer.setData('text/plain', cap.id);
+                      event.dataTransfer.setData('text/plain', `capsule:${cap.id}`);
                     }}
                     onDragEnd={() => {
                       setDraggingId(null);

@@ -163,7 +163,19 @@ For a file server:
 }
 ```
 
-The current updater expects filesystem paths, such as a local directory or a Windows shared folder. Do not use an HTTP URL unless the updater has been extended to support HTTP downloads.
+The updater supports filesystem paths, Windows shared folders, and HTTPS release assets.
+
+For GitHub Releases:
+
+```json
+{
+  "latest_path": "https://github.com/signorzhao/capsule-transfer/releases/latest/download/latest.json",
+  "allowed_source_prefixes": [
+    "https://github.com/signorzhao/capsule-transfer/releases/"
+  ],
+  "channel": "stable"
+}
+```
 
 ## allowed_source_prefixes
 

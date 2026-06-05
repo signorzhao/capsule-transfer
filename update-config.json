@@ -1,5 +1,7 @@
 {
-  "latest_path": "",
-  "allowed_source_prefixes": [],
+  "latest_path": "https://github.com/signorzhao/capsule-transfer/releases/latest/download/latest.json",
+  "allowed_source_prefixes": [
+    "https://github.com/signorzhao/capsule-transfer/releases/"
+  ],
   "channel": "stable"
 }

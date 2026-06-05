@@ -812,7 +812,13 @@ def _load_capsule_folders() -> dict:
                 clean_ids.append(capsule_id)
         memberships[folder_id] = clean_ids
 
-    return {"folders": folders, "memberships": memberships}
+    data = {"folders": folders, "memberships": memberships}
+    if not CAPSULE_FOLDERS_FILE.exists():
+        try:
+            _save_capsule_folders(data)
+        except Exception:
+            pass
+    return data
 
 
 def _save_capsule_folders(data: dict):
