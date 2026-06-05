@@ -263,18 +263,18 @@ fn download_http_to_file(url: &str, dest: &Path) -> Result<(), String> {
     let script = concat!(
         "$ErrorActionPreference = 'Stop'; ",
         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; ",
-        "Invoke-WebRequest -UseBasicParsing -Uri $args[0] -OutFile $args[1]"
+        "Invoke-WebRequest -UseBasicParsing -Uri $env:CAPSULE_UPDATE_URL -OutFile $env:CAPSULE_UPDATE_DEST"
     );
     let dest_arg = dest.to_string_lossy().to_string();
     let mut command = Command::new("powershell.exe");
+    command.env("CAPSULE_UPDATE_URL", url);
+    command.env("CAPSULE_UPDATE_DEST", dest_arg.as_str());
     command.args([
         "-NoProfile",
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
         script,
-        url,
-        dest_arg.as_str(),
     ]);
     #[cfg(target_os = "windows")]
     {
