@@ -48,7 +48,7 @@ function normalizeNetworkInfo(payload) {
 
 async function tauriInvoke(command, args = {}) {
   if (!window.__TAURI_INTERNALS__) {
-    throw new Error('自动更新仅在桌面版中可用。');
+    throw new Error('Automatic updates are available only in the desktop app.');
   }
   const { invoke } = await import('@tauri-apps/api/core');
   return invoke(command, args);
@@ -68,7 +68,7 @@ async function jsonFetch(path, options = {}) {
     });
   } catch (e) {
     if (e.name === 'AbortError') {
-      throw new Error('请求超时，请确认 REAPER 和 Bridge 正在响应后重试。');
+      throw new Error('The request timed out. Confirm that REAPER and Bridge are responding, then try again.');
     }
     throw e;
   } finally {

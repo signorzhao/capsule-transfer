@@ -15,6 +15,18 @@ body {
 }
 
 .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+.capsule-waveform::part(scroll) {
+  overflow: hidden;
+}
+
+.capsule-waveform::part(canvases) {
+  border-top: 1px solid #20262a;
+  border-bottom: 1px solid #20262a;
+}
+
+.capsule-waveform::part(cursor) {
+  box-shadow: 0 0 0 1px rgba(117, 168, 192, 0.18);
+}
 .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
 .custom-scrollbar::-webkit-scrollbar-thumb { background: #2a3134; border-radius: 10px; }
 

@@ -270,17 +270,24 @@ MakeDir = function(path)
     if not path or path == "" then
         return false
     end
-    
+
+    local normalizedPath = path:gsub("\\", "/")
+    if reaper.RecursiveCreateDirectory then
+        local ok = pcall(reaper.RecursiveCreateDirectory, normalizedPath, 0)
+        if ok and PathExists(path) then
+            return true
+        end
+    end
+
     if IsWindows() then
         local winPath = path:gsub("/", "\\")
         local cmd = string.format('if not exist "%s" mkdir "%s"', winPath, winPath)
         os.execute(cmd)
     else
-        local normalizedPath = path:gsub("\\", "/")
         os.execute('mkdir -p "' .. normalizedPath .. '"')
     end
     
-    return true
+    return PathExists(path)
 end
 
 -- 跨平台复制文件
