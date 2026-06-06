@@ -1,6 +1,6 @@
 [package]
 name = "CapsuleTransfer"
-version = "0.7.9"
+version = "0.7.10"
 description = "Capsule LAN"
 authors = ["signorzhao"]
 edition = "2021"
