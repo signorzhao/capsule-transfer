@@ -239,27 +239,35 @@ function Shell() {
   }, [refreshBridgeStatus, captureStatus]);
 
   useEffect(() => {
-    const es = new EventSource(api.notificationsUrl);
-    es.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'transfer_request') {
-          setPendingRequests((prev) => {
-            if (prev.find((req) => req.id === data.request.id)) return prev;
-            return [...prev, data.request];
-          });
-          setShowIncoming(true);
-          toast.info(`${data.request.sender_name} requested to send "${data.request.capsule_name}"`);
-        } else if (data.type === 'capsule_received') {
-          toast.success(`New capsule received: ${data.capsule?.name || 'Capsule'}`);
-          refreshAll();
+    let es = null;
+    let cancelled = false;
+    api.initialize().then(() => {
+      if (cancelled) return;
+      es = new EventSource(api.notificationsUrl);
+      es.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'transfer_request') {
+            setPendingRequests((prev) => {
+              if (prev.find((req) => req.id === data.request.id)) return prev;
+              return [...prev, data.request];
+            });
+            setShowIncoming(true);
+            toast.info(`${data.request.sender_name} requested to send "${data.request.capsule_name}"`);
+          } else if (data.type === 'capsule_received') {
+            toast.success(`New capsule received: ${data.capsule?.name || 'Capsule'}`);
+            refreshAll();
+          }
+        } catch {
+          // Ignore malformed keepalive/event payloads.
         }
-      } catch {
-        // Ignore malformed keepalive/event payloads.
-      }
+      };
+      es.onerror = () => {};
+    }).catch(() => {});
+    return () => {
+      cancelled = true;
+      es?.close();
     };
-    es.onerror = () => {};
-    return () => es.close();
   }, [refreshAll, toast]);
 
   useEffect(() => {
@@ -721,6 +729,8 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
   const waveformRef = useRef(null);
   const waveSurferRef = useRef(null);
   const autoplayPreviewRef = useRef(false);
+  const draggingCapsuleIdRef = useRef(null);
+  const draggingFolderIdRef = useRef(null);
   const [contextMenu, setContextMenu] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState('');
@@ -1153,7 +1163,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
     };
     window.addEventListener('keydown', handlePreviewShortcut);
     return () => window.removeEventListener('keydown', handlePreviewShortcut);
-  }, [editingFolderId, editingId, isCreatingFolder, capsulePendingDelete, selectedCapsule, activePreview]);
+  }, [editingFolderId, editingId, isCreatingFolder, capsulePendingDelete, selectedCapsule, activePreview, previewReady]);
 
   useEffect(() => {
     const closeMenu = () => setContextMenu(null);
@@ -1222,6 +1232,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
           onDragStart={(event) => {
             if (!folder.draggableFolder || isEditingFolder || isConfirmingDelete) return;
             event.stopPropagation();
+            draggingFolderIdRef.current = folder.id;
             setDraggingFolderId(folder.id);
             event.dataTransfer.effectAllowed = 'move';
             event.dataTransfer.setData('application/x-capsule-folder-id', folder.id);
@@ -1229,8 +1240,8 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
           }}
           onDragOver={(event) => {
             const dragTypes = Array.from(event.dataTransfer.types || []);
-            const hasCapsule = dragTypes.includes('application/x-capsule-id') || Boolean(draggingId);
-            const hasFolder = dragTypes.includes('application/x-capsule-folder-id') || Boolean(draggingFolderId);
+            const hasCapsule = dragTypes.includes('application/x-capsule-id') || Boolean(draggingCapsuleIdRef.current);
+            const hasFolder = dragTypes.includes('application/x-capsule-folder-id') || Boolean(draggingFolderIdRef.current);
             if ((!hasCapsule || !canDropCapsule) && (!hasFolder || !canDropFolder)) return;
             event.preventDefault();
             event.dataTransfer.dropEffect = hasFolder ? 'move' : 'copy';
@@ -1243,12 +1254,12 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
             event.preventDefault();
             event.stopPropagation();
             const plainValue = event.dataTransfer.getData('text/plain');
-            const droppedFolderId = event.dataTransfer.getData('application/x-capsule-folder-id') || draggingFolderId || (plainValue?.startsWith('folder:') ? plainValue.slice('folder:'.length) : '');
+            const droppedFolderId = event.dataTransfer.getData('application/x-capsule-folder-id') || draggingFolderIdRef.current || (plainValue?.startsWith('folder:') ? plainValue.slice('folder:'.length) : '');
             if (droppedFolderId && canDropFolder) {
               moveFolder(droppedFolderId, folderDropTargetId);
               return;
             }
-            const capsuleId = draggingId || event.dataTransfer.getData('application/x-capsule-id') || (plainValue?.startsWith('capsule:') ? plainValue.slice('capsule:'.length) : plainValue);
+            const capsuleId = draggingCapsuleIdRef.current || event.dataTransfer.getData('application/x-capsule-id') || (plainValue?.startsWith('capsule:') ? plainValue.slice('capsule:'.length) : plainValue);
             if (capsuleId && canDropCapsule) {
               addToFolder(folder.id, capsuleId);
             }
@@ -1256,6 +1267,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
           onDragEnd={() => {
             if (folder.draggableFolder) {
               setDraggingFolderId(null);
+              draggingFolderIdRef.current = null;
               setDragOverFolder(null);
             }
           }}
@@ -1467,12 +1479,14 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
                       openContextMenu(event, 'capsule', cap);
                     }}
                     onDragStart={(event) => {
+                      draggingCapsuleIdRef.current = cap.id;
                       setDraggingId(cap.id);
                       event.dataTransfer.effectAllowed = 'copy';
                       event.dataTransfer.setData('application/x-capsule-id', cap.id);
                       event.dataTransfer.setData('text/plain', `capsule:${cap.id}`);
                     }}
                     onDragEnd={() => {
+                      draggingCapsuleIdRef.current = null;
                       setDraggingId(null);
                       setDragOverFolder(null);
                     }}

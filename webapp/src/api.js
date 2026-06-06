@@ -1,4 +1,5 @@
-const API_BASE = (import.meta.env.VITE_API_BASE || 'http://127.0.0.1:5005') + '/api';
+let API_BASE = (import.meta.env.VITE_API_BASE || 'http://127.0.0.1:5005') + '/api';
+let apiInitialization = null;
 
 function isPrivateLanHost(value) {
   if (!value) return false;
@@ -54,7 +55,22 @@ async function tauriInvoke(command, args = {}) {
   return invoke(command, args);
 }
 
+export async function initializeApi() {
+  if (apiInitialization) return apiInitialization;
+  apiInitialization = (async () => {
+    if (!window.__TAURI_INTERNALS__) return API_BASE;
+    const base = await tauriInvoke('backend_api_base');
+    API_BASE = `${String(base).replace(/\/+$/, '')}/api`;
+    return API_BASE;
+  })().catch((error) => {
+    apiInitialization = null;
+    throw error;
+  });
+  return apiInitialization;
+}
+
 async function jsonFetch(path, options = {}) {
+  await initializeApi();
   const { timeoutMs, ...fetchOptions } = options;
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   const controller = timeoutMs ? new AbortController() : null;
@@ -91,7 +107,8 @@ async function jsonFetch(path, options = {}) {
 }
 
 export const api = {
-  base: API_BASE,
+  get base() { return API_BASE; },
+  initialize: initializeApi,
   health: () => jsonFetch('/health'),
   network: async () => {
     const body = await jsonFetch('/network/info');
@@ -134,7 +151,7 @@ export const api = {
   getPendingRequests: () => jsonFetch('/p2p/pending'),
   acceptRequest: (id) => jsonFetch(`/p2p/accept/${id}`, { method: 'POST' }),
   rejectRequest: (id) => jsonFetch(`/p2p/reject/${id}`, { method: 'POST' }),
-  notificationsUrl: `${API_BASE}/events`,
+  get notificationsUrl() { return `${API_BASE}/events`; },
 
   getReaperBridgeStatus: () => jsonFetch('/reaper/bridge/status', { timeoutMs: 12000 }),
   pingReaperBridge: () => jsonFetch('/reaper/bridge/ping', { method: 'POST' }),
@@ -155,6 +172,7 @@ export const api = {
 };
 
 export async function uploadCapsuleBundle(file, meta = {}) {
+  await initializeApi();
   const fd = new FormData();
   fd.append('bundle', file);
   if (meta && Object.keys(meta).length) {

@@ -39,7 +39,10 @@ from net import network_info
 
 # ---------------------- 路径初始化（绿色版） ----------------------
 
-if getattr(sys, "frozen", False):
+_forced_app_dir = os.getenv("CAPSULE_TRANSFER_APP_DIR", "").strip()
+if _forced_app_dir:
+    APP_DIR = Path(_forced_app_dir).resolve()
+elif getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
     APP_DIR = Path(__file__).resolve().parent

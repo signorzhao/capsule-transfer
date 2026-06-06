@@ -8,11 +8,13 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::Mutex;
+use std::net::TcpListener;
 use std::{thread, time::Duration};
 use tauri::Manager;
 use tauri_plugin_notification::NotificationExt;
 
 struct BackendProcess(Mutex<Option<Child>>);
+struct BackendPort(u16);
 
 const UPDATE_CONFIG_FILE: &str = "update-config.json";
 const VERSION_FILE: &str = "version.json";
@@ -354,9 +356,19 @@ fn find_backend_exe(app: &tauri::App) -> Option<PathBuf> {
     None
 }
 
-fn start_backend(app: &tauri::App) -> Option<Child> {
+fn available_backend_port() -> u16 {
+    (5005..=5099)
+        .find(|port| TcpListener::bind(("127.0.0.1", *port)).is_ok())
+        .unwrap_or(5005)
+}
+
+fn start_backend(app: &tauri::App, port: u16) -> Option<Child> {
     let exe_path = find_backend_exe(app)?;
     let work_dir = exe_path.parent()?;
+    let app_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| work_dir.to_path_buf());
 
     kill_existing_backend_processes();
 
@@ -366,6 +378,8 @@ fn start_backend(app: &tauri::App) -> Option<Child> {
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         Command::new(&exe_path)
             .current_dir(work_dir)
+            .env("CAPSULE_TRANSFER_APP_DIR", &app_dir)
+            .env("LAN_CAPSULE_PORT", port.to_string())
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .ok()
@@ -373,7 +387,12 @@ fn start_backend(app: &tauri::App) -> Option<Child> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        Command::new(&exe_path).current_dir(work_dir).spawn().ok()
+        Command::new(&exe_path)
+            .current_dir(work_dir)
+            .env("CAPSULE_TRANSFER_APP_DIR", &app_dir)
+            .env("LAN_CAPSULE_PORT", port.to_string())
+            .spawn()
+            .ok()
     }
 }
 
@@ -430,6 +449,11 @@ fn notify_new_capsule(app: tauri::AppHandle, sender: String) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
     }
+}
+
+#[tauri::command]
+fn backend_api_base(port: tauri::State<'_, BackendPort>) -> String {
+    format!("http://127.0.0.1:{}", port.0)
 }
 
 #[tauri::command]
@@ -643,16 +667,20 @@ fn main() {
             flash_taskbar,
             check_update,
             download_update,
-            install_update
+            install_update,
+            backend_api_base
         ])
         .setup(|app| {
-            let child = start_backend(app);
+            let requested_port = available_backend_port();
+            let child = start_backend(app, requested_port);
+            let port = if child.is_some() { requested_port } else { 5005 };
             if child.is_some() {
-                eprintln!("[Capsule LAN] Flask backend started");
+                eprintln!("[Capsule LAN] Flask backend started on port {port}");
             } else {
                 eprintln!("[Capsule LAN] No bundled backend, expecting manual Flask");
             }
             app.manage(BackendProcess(Mutex::new(child)));
+            app.manage(BackendPort(port));
             Ok(())
         })
         .build(tauri::generate_context!())
