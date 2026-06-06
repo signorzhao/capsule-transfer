@@ -1035,18 +1035,34 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
     }
   }, [filteredCapsules, selectedId]);
 
-  const handlePlay = (cap, forcePlay = false) => {
-    if (activePreview?.id === cap.id && waveSurferRef.current) {
-      if (forcePlay && !waveSurferRef.current.isPlaying()) waveSurferRef.current.play();
-      else waveSurferRef.current.playPause();
+  const loadPreview = (cap, autoplay = false) => {
+    if (activePreview?.id === cap.id) {
+      if (autoplay) {
+        if (waveSurferRef.current && previewReady) waveSurferRef.current.play();
+        else autoplayPreviewRef.current = true;
+      }
       return;
     }
-    autoplayPreviewRef.current = true;
+    autoplayPreviewRef.current = autoplay;
+    setPlayingId(null);
     setPreviewError('');
     setPreviewReady(false);
     setPreviewTime(0);
     setPreviewDuration(0);
     setActivePreview(cap);
+  };
+
+  const handlePlay = (cap, forcePlay = false) => {
+    if (activePreview?.id !== cap.id || !waveSurferRef.current) {
+      loadPreview(cap, true);
+      return;
+    }
+    if (!previewReady) {
+      autoplayPreviewRef.current = true;
+      return;
+    }
+    if (forcePlay && !waveSurferRef.current.isPlaying()) waveSurferRef.current.play();
+    else waveSurferRef.current.playPause();
   };
 
   const closePreview = () => {
@@ -1112,6 +1128,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
       wavesurfer.on('pause', () => setPlayingId(null)),
       wavesurfer.on('finish', () => setPlayingId(null)),
       wavesurfer.on('timeupdate', (time) => setPreviewTime(time)),
+      wavesurfer.on('interaction', (time) => setPreviewTime(time)),
       wavesurfer.on('error', () => {
         setPreviewError('Preview audio is unavailable for this capsule.');
         setPlayingId(null);
@@ -1440,7 +1457,10 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
                   <div
                     key={cap.id}
                     draggable
-                    onClick={() => setSelectedId(cap.id)}
+                    onClick={() => {
+                      setSelectedId(cap.id);
+                      loadPreview(cap);
+                    }}
                     onDoubleClick={() => handlePlay(cap, true)}
                     onContextMenu={(event) => {
                       setSelectedId(cap.id);
