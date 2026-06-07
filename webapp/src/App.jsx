@@ -833,16 +833,26 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
   const hasMissingPlugins = (cap) => Boolean(cap.plugin_status?.inventory_available && cap.plugin_status?.missing > 0);
   useEffect(() => {
     let cancelled = false;
-    api.listCapsuleFolders()
-      .then((res) => {
-        if (!cancelled) {
-          setCustomFolders(res.data?.items || []);
-          setFolderError('');
+    const loadFolders = async () => {
+      let lastError = null;
+      for (let attempt = 0; attempt < 3 && !cancelled; attempt += 1) {
+        try {
+          const res = await api.listCapsuleFolders();
+          if (!cancelled) {
+            setCustomFolders(res.data?.items || []);
+            setFolderError('');
+          }
+          return;
+        } catch (err) {
+          lastError = err;
+          if (attempt < 2) {
+            await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+          }
         }
-      })
-      .catch((err) => {
-        if (!cancelled) setFolderError(`Failed to load collections: ${err.message}`);
-      });
+      }
+      if (!cancelled) setFolderError(`Failed to load collections: ${lastError?.message || 'Unknown error'}`);
+    };
+    loadFolders();
     return () => { cancelled = true; };
   }, []);
 

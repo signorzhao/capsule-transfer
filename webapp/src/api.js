@@ -1,6 +1,24 @@
 let API_BASE = (import.meta.env.VITE_API_BASE || 'http://127.0.0.1:5005') + '/api';
 let apiInitialization = null;
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitForBackendReady(apiBase, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const resp = await fetch(`${apiBase}/health`, { cache: 'no-store' });
+      if (resp.ok) return;
+      lastError = new Error(`HTTP ${resp.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep(200);
+  }
+  throw new Error(`Backend did not become ready: ${lastError?.message || 'timeout'}`);
+}
+
 function isPrivateLanHost(value) {
   if (!value) return false;
   const host = String(value).trim().toLowerCase();
@@ -73,6 +91,7 @@ export async function initializeApi() {
     if (!window.__TAURI_INTERNALS__) return API_BASE;
     const base = await tauriInvoke('backend_api_base');
     API_BASE = `${String(base).replace(/\/+$/, '')}/api`;
+    await waitForBackendReady(API_BASE);
     return API_BASE;
   })().catch((error) => {
     apiInitialization = null;
