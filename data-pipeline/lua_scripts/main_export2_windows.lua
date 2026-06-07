@@ -290,8 +290,31 @@ MakeDir = function(path)
     return PathExists(path)
 end
 
+local function ProgressJSONEscape(value)
+    return tostring(value or "")
+        :gsub("\\", "\\\\")
+        :gsub('"', '\\"')
+        :gsub("\r", "\\r")
+        :gsub("\n", "\\n")
+end
+
+local function BridgeProgress(fields)
+    if not reaper or not reaper.SetExtState then return end
+    fields = fields or {}
+    local json = string.format(
+        '{"phase":"%s","current_file":"%s","current":%d,"total":%d,"bytes_done":%d,"bytes_total":%d}',
+        ProgressJSONEscape(fields.phase),
+        ProgressJSONEscape(fields.current_file),
+        tonumber(fields.current) or 0,
+        tonumber(fields.total) or 0,
+        tonumber(fields.bytes_done) or 0,
+        tonumber(fields.bytes_total) or 0
+    )
+    reaper.SetExtState("capsule_transfer", "capture_progress", json, false)
+end
+
 -- 跨平台复制文件
-local function CopyFile(src, dst)
+local function CopyFile(src, dst, onProgress)
     if not src or not dst then
         Log("  CopyFile: 参数为空\n")
         return false
@@ -304,27 +327,33 @@ local function CopyFile(src, dst)
         return false
     end
     
-    local content = srcFile:read("*a")
-    srcFile:close()
-    
-    if not content then
-        Log("  CopyFile: 无法读取源文件内容\n")
-        return false
-    end
-    
     local dstFile, dstErr = io.open(dst, "wb")
     if not dstFile then
+        srcFile:close()
         Log("  CopyFile: 无法创建目标文件: " .. tostring(dstErr) .. "\n")
         return false
     end
-    
-    local success = dstFile:write(content)
+
+    local copiedBytes = 0
+    local success = true
+    while true do
+        local block = srcFile:read(1024 * 1024)
+        if not block then break end
+        if not dstFile:write(block) then
+            success = false
+            break
+        end
+        copiedBytes = copiedBytes + #block
+        if onProgress then onProgress(copiedBytes) end
+    end
+    srcFile:close()
     dstFile:close()
     
     if success then
-        Log("  CopyFile: 成功复制 " .. #content .. " 字节\n")
+        Log("  CopyFile: 成功复制 " .. copiedBytes .. " 字节\n")
         return true
     else
+        os.remove(dst)
         Log("  CopyFile: 写入失败\n")
         return false
     end
@@ -1684,6 +1713,48 @@ function CollectSelectedItemsMedia()
     return mediaFiles, itemsInfo
 end
 
+local function StablePathHash(path)
+    local hash = 5381
+    local normalized = tostring(path or ""):gsub("\\", "/"):lower()
+    for i = 1, #normalized do
+        hash = (hash * 33 + normalized:byte(i)) % 4294967296
+    end
+    return string.format("%08x", hash)
+end
+
+local function BuildMediaTargetNames(mediaFiles)
+    local counts = {}
+    for _, baseName in pairs(mediaFiles) do
+        local key = tostring(baseName):lower()
+        counts[key] = (counts[key] or 0) + 1
+    end
+
+    local names = {}
+    local used = {}
+    for sourcePath, baseName in pairs(mediaFiles) do
+        local candidate = baseName
+        if counts[tostring(baseName):lower()] > 1 then
+            local stem, extension = tostring(baseName):match("^(.*)(%.[^.]*)$")
+            if not stem then
+                stem, extension = tostring(baseName), ""
+            end
+            candidate = stem .. "_" .. StablePathHash(sourcePath) .. extension
+        end
+        local key = candidate:lower()
+        local suffix = 2
+        while used[key] do
+            local stem, extension = candidate:match("^(.*)(%.[^.]*)$")
+            if not stem then stem, extension = candidate, "" end
+            candidate = stem .. "_" .. suffix .. extension
+            key = candidate:lower()
+            suffix = suffix + 1
+        end
+        used[key] = true
+        names[sourcePath] = candidate
+    end
+    return names
+end
+
 -- 复制媒体文件到目标 Audio 目录
 function CopyMediaFiles(mediaFiles, audioDir)
     reaper.ShowConsoleMsg("\n=== 复制媒体文件 ===\n")
@@ -1694,30 +1765,67 @@ function CopyMediaFiles(mediaFiles, audioDir)
     local copiedCount = 0
     local failedFiles = {}
     local pathMapping = {}  -- {原路径 = 新相对路径}
+    local targetNames = BuildMediaTargetNames(mediaFiles)
+    local total = 0
+    local totalBytes = 0
+    for sourcePath, _ in pairs(mediaFiles) do
+        total = total + 1
+        totalBytes = totalBytes + GetFileSize(sourcePath)
+    end
+    local completed = 0
+    local completedBytes = 0
     
     for sourcePath, baseName in pairs(mediaFiles) do
-        local targetPath = JoinPath(audioDir, baseName)
+        local targetName = targetNames[sourcePath] or baseName
+        local targetPath = JoinPath(audioDir, targetName)
         
-        reaper.ShowConsoleMsg("复制: " .. baseName .. "\n")
+        reaper.ShowConsoleMsg("复制: " .. baseName .. " -> " .. targetName .. "\n")
         
         -- 执行复制
-        CopyFile(sourcePath, targetPath)
+        local sourceSize = GetFileSize(sourcePath)
+        BridgeProgress({
+            phase = "copying_media",
+            current_file = targetName,
+            current = completed + 1,
+            total = total,
+            bytes_done = completedBytes,
+            bytes_total = totalBytes
+        })
+        local copyOk = CopyFile(sourcePath, targetPath, function(fileBytes)
+            BridgeProgress({
+                phase = "copying_media",
+                current_file = targetName,
+                current = completed + 1,
+                total = total,
+                bytes_done = completedBytes + fileBytes,
+                bytes_total = totalBytes
+            })
+        end)
         
         -- 验证
         local f = io.open(targetPath, "r")
-        if f then
+        if copyOk and f then
             f:close()
             copiedCount = copiedCount + 1
-            pathMapping[sourcePath] = "Audio/" .. baseName
+            completedBytes = completedBytes + sourceSize
+            pathMapping[sourcePath] = "Audio/" .. targetName
             reaper.ShowConsoleMsg("  ✓ 成功\n")
         else
+            if f then f:close() end
             table.insert(failedFiles, sourcePath)
             reaper.ShowConsoleMsg("  ✗ 失败，保留原路径\n")
         end
+        completed = completed + 1
     end
     
-    local total = 0
-    for _ in pairs(mediaFiles) do total = total + 1 end
+    BridgeProgress({
+        phase = "copying_media",
+        current_file = "",
+        current = total,
+        total = total,
+        bytes_done = completedBytes,
+        bytes_total = totalBytes
+    })
     reaper.ShowConsoleMsg("复制完成: " .. copiedCount .. "/" .. total .. "\n")
     
     return pathMapping, failedFiles
@@ -2374,8 +2482,14 @@ function CollectMediaFilesFromProject()
     return mediaFiles
 end
 
--- 保存工程并复制媒体文件到指定路径（Windows 优化版）
+-- 已停用：旧流程会按 basename 复制媒体，可能覆盖同名文件。
+-- 主捕获流程必须使用 CopyMediaFiles + GenerateCapsuleRPP。
 function SaveProjectWithMedia(targetPath)
+    reaper.ShowConsoleMsg("SaveProjectWithMedia 已停用，请使用主捕获流程\n")
+    return false
+end
+
+local function DeprecatedSaveProjectWithMedia(targetPath)
     reaper.ShowConsoleMsg("\n=== SaveProjectWithMedia (Windows) ===\n")
     reaper.ShowConsoleMsg("目标路径: " .. targetPath .. "\n")
 

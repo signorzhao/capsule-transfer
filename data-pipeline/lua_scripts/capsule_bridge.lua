@@ -3,7 +3,7 @@
 -- Install once, then keep REAPER open/minimized while Capsule Transfer sends commands.
 
 local SECTION = "capsule_transfer"
-local BRIDGE_VERSION = "1.0.6"
+local BRIDGE_VERSION = "1.0.7"
 local HEARTBEAT_STALE_SECONDS = 15
 local COMMAND_KEY = "command_v2"
 local RESULT_KEY = "result_v2"

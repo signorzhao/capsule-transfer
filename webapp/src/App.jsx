@@ -52,6 +52,10 @@ function formatBytes(bytes = 0) {
   return `${n.toFixed(n >= 100 || i === 0 ? 0 : 1)} ${u[i]}`;
 }
 
+function createTaskId() {
+  return globalThis.crypto?.randomUUID?.() || `task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 function formatDate(s) {
   if (!s) return '';
   try {
@@ -118,6 +122,7 @@ function Shell() {
   const [showTempPeerForm, setShowTempPeerForm] = useState(false);
   const [showAddContact, setShowAddContact] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [transferProgress, setTransferProgress] = useState(null);
   const [captureStatus, setCaptureStatus] = useState(null);
   const [receiveMode, setReceiveMode] = useState('confirm');
   const [pendingRequests, setPendingRequests] = useState([]);
@@ -264,6 +269,12 @@ function Shell() {
           } else if (data.type === 'capsule_received') {
             toast.success(`New capsule received: ${data.capsule?.name || 'Capsule'}`);
             refreshAll();
+          } else if (data.type === 'transfer_progress') {
+            setTransferProgress((prev) => {
+              if (data.direction === 'send' && prev?.task_id && data.task_id && prev.task_id !== data.task_id) return prev;
+              if (data.direction === 'receive' && prev?.direction === 'send' && !['completed', 'error'].includes(prev.phase)) return prev;
+              return { ...(prev || {}), ...data, updated_at: Date.now() };
+            });
           }
         } catch {
           // Ignore malformed keepalive/event payloads.
@@ -335,10 +346,29 @@ function Shell() {
 
     setIsSending(true);
     let successCount = 0;
+    let taskIndex = 0;
+    const totalTasks = selectedCapsules.length * peers.length;
     for (const cap of selectedCapsules) {
       for (const peer of peers) {
+        taskIndex += 1;
+        const taskId = createTaskId();
+        const peerName = peer.name || peer.last_ip || peer.ip;
+        setTransferProgress({
+          direction: 'send',
+          task_id: taskId,
+          capsule_id: cap.uuid || cap.id,
+          capsule_name: cap.name,
+          peer_name: peerName,
+          phase: 'preparing',
+          progress: null,
+          task_index: taskIndex,
+          task_total: totalTasks,
+          bytes_transferred: 0,
+          total_bytes: 0,
+        });
         try {
           await api.send({
+            task_id: taskId,
             capsule_id: cap.uuid || cap.id,
             contact_id: peer.id,
             target_peer_id: peer.peer_id,
@@ -348,7 +378,21 @@ function Shell() {
             target_name: peer.name,
           });
           successCount += 1;
+          setTransferProgress((prev) => ({
+            ...(prev || {}),
+            phase: 'completed',
+            progress: 100,
+            task_index: taskIndex,
+            task_total: totalTasks,
+          }));
         } catch (e) {
+          setTransferProgress((prev) => ({
+            ...(prev || {}),
+            phase: 'error',
+            error: e.message,
+            task_index: taskIndex,
+            task_total: totalTasks,
+          }));
           toast.error(`Failed to send "${cap.name}" to ${peer.name}: ${e.message}`);
         }
       }
@@ -408,19 +452,26 @@ function Shell() {
           const status = await api.getReaperBridgeStatus();
           if (!captureActive) return;
           const bridgePhase = status.data?.export_phase || '';
+          const bridgeProgress = status.data?.capture_progress || {};
           if (!bridgePhase) return;
           const lower = bridgePhase.toLowerCase();
           if (!lower.includes('saving capsule') && !lower.includes('rendering preview')) return;
           const steps = captureStepsForPhase(bridgePhase, payload?.render_preview);
-          const message = lower.includes('rendering preview')
-            ? 'Capsule saved. Rendering preview.'
-            : 'Saving the capsule package. REAPER may remain minimized.';
+          const progress = lower.includes('copying media') ? bridgeProgress : {};
+          let message = 'Saving the capsule package. REAPER may remain minimized.';
+          if (lower.includes('checking selected items')) message = 'Reading the selected REAPER items.';
+          else if (lower.includes('copying media')) message = 'Copying source media into the capsule.';
+          else if (lower.includes('generating rpp')) message = 'Generating the portable REAPER project.';
+          else if (lower.includes('writing metadata')) message = 'Writing capsule metadata and plugin information.';
+          else if (lower.includes('rendering preview: preparing')) message = 'Preparing tracks and render settings for the preview.';
+          else if (lower.includes('rendering preview: rendering')) message = 'Rendering the preview audio in REAPER.';
+          else if (lower.includes('rendering preview')) message = 'Capsule saved. Rendering preview.';
           setCaptureStatus((prev) => {
             if (!captureActive || prev?.phase === 'done' || prev?.phase === 'error') return prev;
             const allDone = (prev?.steps || []).length > 0 && (prev.steps || []).every((step) => step.status === 'done' || step.status === 'skipped');
             if (allDone) return prev;
             const nextPhase = lower.includes('rendering preview') ? 'rendering' : 'saving';
-            const next = { phase: nextPhase, message, steps };
+            const next = { phase: nextPhase, message, steps, progress };
             const nextAllDone = steps.length > 0 && steps.every((step) => step.status === 'done' || step.status === 'skipped');
             if (nextAllDone) {
               return { ...next, phase: 'done', settled: true };
@@ -699,7 +750,7 @@ function Shell() {
         <main className="flex-1 overflow-y-auto bg-[#090b0d] p-5 custom-scrollbar">
           {activeTab === 'library' && <LibraryView capsules={capsules} onSend={handleSelectCapsuleForSend} onDelete={handleDeleteCapsule} onCreate={handleCreateCapsule} onRequestCreate={handleRequestCreateCapsule} isCheckingSetup={isCheckingCaptureSetup} onRename={handleRenameCapsule} onOpenRpp={handleOpenRpp} onOpenFolder={handleOpenFolder} />}
           {activeTab === 'contacts' && <ContactsView contacts={contacts} onlineContacts={onlineContacts} onSend={handleStartTransferTo} onDelete={handleDeleteContact} onPing={handlePingContact} showAddForm={showAddContact} setShowAddForm={setShowAddContact} onAdd={handleAddContact} />}
-          {activeTab === 'transfer' && <TransferView capsules={capsules} contacts={contacts} selectedCapsules={selectedCapsules} setSelectedCapsules={setSelectedCapsules} targetContacts={targetContacts} setTargetContacts={setTargetContacts} tempPeer={tempPeer} setTempPeer={setTempPeer} showTempPeerForm={showTempPeerForm} setShowTempPeerForm={setShowTempPeerForm} isSending={isSending} onSend={handleSend} />}
+          {activeTab === 'transfer' && <TransferView capsules={capsules} contacts={contacts} selectedCapsules={selectedCapsules} setSelectedCapsules={setSelectedCapsules} targetContacts={targetContacts} setTargetContacts={setTargetContacts} tempPeer={tempPeer} setTempPeer={setTempPeer} showTempPeerForm={showTempPeerForm} setShowTempPeerForm={setShowTempPeerForm} isSending={isSending} transferProgress={transferProgress} onSend={handleSend} />}
           {activeTab === 'settings' && <SettingsView networkInfo={networkInfo} apiBase={api.base} appVersion={appVersion} bridgeStatus={bridgeStatus} onRefreshBridge={refreshBridgeStatus} onOpenSetup={() => setShowSetupWizard(true)} />}
         </main>
       </div>
@@ -1483,7 +1534,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
                 return (
                   <div
                     key={cap.id}
-                    draggable
+                    draggable={editingId !== cap.id}
                     onClick={() => {
                       setSelectedId(cap.id);
                       loadPreview(cap);
@@ -1494,6 +1545,10 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
                       openContextMenu(event, 'capsule', cap);
                     }}
                     onDragStart={(event) => {
+                      if (editingId === cap.id) {
+                        event.preventDefault();
+                        return;
+                      }
                       draggingCapsuleIdRef.current = cap.id;
                       setDraggingId(cap.id);
                       event.dataTransfer.effectAllowed = 'copy';
@@ -1516,8 +1571,12 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
                           <input
                             autoFocus
                             value={editName}
+                            draggable={false}
+                            onMouseDown={(event) => event.stopPropagation()}
                             onClick={(event) => event.stopPropagation()}
                             onDoubleClick={(event) => event.stopPropagation()}
+                            onDragStart={(event) => event.stopPropagation()}
+                            onDrop={(event) => event.stopPropagation()}
                             onChange={(event) => setEditName(event.target.value)}
                             onKeyDown={(event) => {
                               if (event.key === 'Enter') confirmRename(cap);
@@ -1878,12 +1937,22 @@ function FormField({ label, children }) {
   return <label className="block"><span className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">{label}</span>{React.cloneElement(children, { className: 'w-full bg-[#0f1115] border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-indigo-500' })}</label>;
 }
 
-function TransferView({ capsules, contacts, selectedCapsules, setSelectedCapsules, targetContacts, setTargetContacts, tempPeer, setTempPeer, showTempPeerForm, setShowTempPeerForm, isSending, onSend }) {
+function TransferView({ capsules, contacts, selectedCapsules, setSelectedCapsules, targetContacts, setTargetContacts, tempPeer, setTempPeer, showTempPeerForm, setShowTempPeerForm, isSending, transferProgress, onSend }) {
   const toggleCapsule = (cap) => setSelectedCapsules((prev) => (prev.find((c) => c.id === cap.id) ? prev.filter((c) => c.id !== cap.id) : [...prev, cap]));
   const toggleTarget = (contact) => setTargetContacts((prev) => (prev.find((c) => c.id === contact.id) ? prev.filter((c) => c.id !== contact.id) : [...prev, contact]));
   const recipientCount = targetContacts.length + (tempPeer.ip ? 1 : 0);
   const totalTasks = selectedCapsules.length * recipientCount;
   const selectedBytes = selectedCapsules.reduce((sum, capsule) => sum + (capsule.size_bytes || 0), 0);
+  const progressValue = Number.isFinite(Number(transferProgress?.progress))
+    ? Math.max(0, Math.min(100, Number(transferProgress.progress)))
+    : null;
+  const transferPhaseLabels = {
+    preparing: 'Preparing package',
+    waiting_for_acceptance: 'Waiting for acceptance',
+    transferring: transferProgress?.direction === 'receive' ? 'Receiving' : 'Sending',
+    completed: 'Transfer complete',
+    error: 'Transfer failed',
+  };
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -1947,6 +2016,35 @@ function TransferView({ capsules, contacts, selectedCapsules, setSelectedCapsule
             <SummaryRow label="Destinations" value={recipientCount} />
             <SummaryRow label="Total Size" value={formatBytes(selectedBytes)} />
             <SummaryRow label="Transfer Tasks" value={totalTasks} />
+            {transferProgress && <div className="rounded-lg border border-[#2a3338] bg-[#101518] p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate text-xs font-semibold text-slate-200">
+                    {transferProgress.direction === 'receive' ? 'Receiving' : 'Sending'} {transferProgress.capsule_name || 'Capsule'}
+                  </div>
+                  <div className="mt-1 truncate text-[10px] text-slate-500">
+                    {transferProgress.direction === 'receive' ? 'from' : 'to'} {transferProgress.peer_name || transferProgress.target_ip || 'device'}
+                  </div>
+                </div>
+                {transferProgress.task_total > 1 && <span className="shrink-0 text-[10px] text-slate-500">Task {transferProgress.task_index || 1}/{transferProgress.task_total}</span>}
+              </div>
+              <div className="mt-3 flex items-center justify-between text-[10px]">
+                <span className={transferProgress.phase === 'error' ? 'text-red-300' : transferProgress.phase === 'completed' ? 'text-emerald-300' : 'text-[#75a8c0]'}>
+                  {transferPhaseLabels[transferProgress.phase] || 'Working'}
+                </span>
+                <span className="font-mono text-slate-400">{progressValue === null ? '...' : `${progressValue.toFixed(progressValue >= 10 ? 0 : 1)}%`}</span>
+              </div>
+              <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#090b0d]">
+                {progressValue === null
+                  ? <div className="h-full w-1/3 animate-pulse rounded-full bg-[#377894]" />
+                  : <div className={`h-full rounded-full transition-[width] duration-200 ${transferProgress.phase === 'error' ? 'bg-red-500' : transferProgress.phase === 'completed' ? 'bg-emerald-500' : 'bg-[#377894]'}`} style={{ width: `${progressValue}%` }} />}
+              </div>
+              <div className="mt-2 flex justify-between gap-3 text-[10px] text-slate-500">
+                <span>{transferProgress.total_bytes ? `${formatBytes(transferProgress.bytes_transferred)} / ${formatBytes(transferProgress.total_bytes)}` : 'Calculating size...'}</span>
+                <span>{transferProgress.bytes_per_second ? `${formatBytes(transferProgress.bytes_per_second)}/s` : ''}</span>
+              </div>
+              {transferProgress.error && <div className="mt-2 text-[10px] leading-relaxed text-red-300">{transferProgress.error}</div>}
+            </div>}
             <div className="border-t border-[#20262a] pt-5">
               <div className="mb-3 text-[10px] font-bold uppercase tracking-widest text-slate-600">Selected Content</div>
               <div className="space-y-2">
@@ -2334,6 +2432,16 @@ function CaptureOverlayV2({ status, onClose }) {
   const isError = status.phase === 'error';
   const showWorkingLayout = isWorking || (isDone && status.settled);
   const steps = status.steps || [];
+  const progress = status.progress || {};
+  const bytesTotal = Number(progress.bytes_total) || 0;
+  const bytesDone = Number(progress.bytes_done) || 0;
+  const fileTotal = Number(progress.total) || 0;
+  const fileCurrent = Number(progress.current) || 0;
+  const capturePercent = bytesTotal > 0
+    ? Math.max(0, Math.min(100, bytesDone * 100 / bytesTotal))
+    : fileTotal > 0
+      ? Math.max(0, Math.min(100, fileCurrent * 100 / fileTotal))
+      : null;
   const stepStyle = (step) => {
     if (step.status === 'done') return 'bg-emerald-500/15 text-emerald-300 border-emerald-500/25';
     if (step.status === 'active') return 'bg-indigo-500/15 text-indigo-300 border-indigo-500/25';
@@ -2355,6 +2463,13 @@ function CaptureOverlayV2({ status, onClose }) {
           <div className={`w-14 h-14 mx-auto mb-5 rounded-full flex items-center justify-center ${isDone ? 'bg-emerald-600/20' : 'bg-indigo-600/20'}`}>{isDone ? <Check size={28} className="text-emerald-400" /> : <RefreshCw size={28} className="text-indigo-400 animate-spin" />}</div>
           <h3 className="text-lg font-bold text-white mb-2">{isDone ? 'Capture Complete' : 'Capturing Capsule'}</h3>
           <p className="text-sm text-slate-400 leading-relaxed whitespace-pre-line">{status.message}</p>
+          {isWorking && progress.phase === 'copying_media' && <div className="mt-5 rounded-xl border border-slate-700 bg-[#11151b] p-3 text-left">
+            <div className="flex items-center justify-between gap-3 text-xs">
+              <span className="min-w-0 truncate text-slate-300">{progress.current_file ? `Copying ${progress.current_file}` : 'Media files copied'}</span>
+              {fileTotal > 0 && <span className="shrink-0 font-mono text-slate-500">{Math.min(fileCurrent, fileTotal)}/{fileTotal}</span>}
+            </div>
+            {bytesTotal > 0 && <div className="mt-2 flex justify-between text-[10px] text-slate-500"><span>{formatBytes(bytesDone)} / {formatBytes(bytesTotal)}</span><span>{capturePercent?.toFixed(0)}%</span></div>}
+          </div>}
         </>}
         {isDone && !status.settled && <>
           <div className="w-14 h-14 mx-auto mb-5 rounded-full bg-emerald-600/20 flex items-center justify-center"><Zap size={28} className="text-emerald-400" fill="currentColor" /></div>
@@ -2377,7 +2492,11 @@ function CaptureOverlayV2({ status, onClose }) {
             </div>
           ))}
         </div>}
-        {isWorking && <div className="mt-5 h-1 bg-slate-800 rounded-full overflow-hidden"><div className="h-full w-2/3 bg-indigo-500 rounded-full animate-pulse" /></div>}
+        {isWorking && <div className="mt-5 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+          {capturePercent === null
+            ? <div className="h-full w-2/3 bg-indigo-500 rounded-full animate-pulse" />
+            : <div className="h-full bg-indigo-500 rounded-full transition-[width] duration-300" style={{ width: `${capturePercent}%` }} />}
+        </div>}
         {(isDone || isError) && <button onClick={onClose} className="mt-5 px-5 py-2 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg">Close</button>}
       </div>
     </div>

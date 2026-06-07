@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import io
 import base64
 import concurrent.futures
 import hashlib
@@ -21,20 +20,32 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid as uuid_lib
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote, unquote
 
 import requests
-from flask import Flask, Response, jsonify, request, send_file
+from flask import Flask, Response, after_this_request, jsonify, request, send_file
 from flask_cors import CORS
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
-from bundle import build_bundle, extract_bundle
+from bundle import (
+    MAX_BUNDLE_BYTES,
+    STAGING_DIR_NAME,
+    BundleConflictError,
+    build_bundle_file,
+    cleanup_staging,
+    copy_stream_to_file,
+    extract_bundle,
+    import_bundle_file,
+    sha256_file,
+)
 from net import network_info
 
 # ---------------------- 路径初始化（绿色版） ----------------------
@@ -57,6 +68,7 @@ CONFIG_FILE = APP_DIR / "config.json"
 
 CAPSULES_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+cleanup_staging(CAPSULES_DIR)
 os.environ["CAPSULE_TRANSFER_EXPORT_DIR"] = str(CAPSULES_DIR)
 os.environ["SYNESTH_CAPSULE_OUTPUT"] = str(CAPSULES_DIR)
 
@@ -224,6 +236,48 @@ def _ok(data=None, **kwargs):
         payload["data"] = data
     payload.update(kwargs)
     return jsonify(payload)
+
+
+def _temporary_bundle_path(prefix: str) -> Path:
+    staging_dir = CAPSULES_DIR / STAGING_DIR_NAME
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=prefix, suffix=".zip", dir=staging_dir)
+    os.close(fd)
+    return Path(name)
+
+
+def _receive_has_disk_space(size_bytes: int) -> bool:
+    if size_bytes <= 0:
+        return True
+    if size_bytes > MAX_BUNDLE_BYTES:
+        return False
+    reserve = int(os.getenv("LAN_CAPSULE_DISK_RESERVE_MB", "256")) * 1024 * 1024
+    return shutil.disk_usage(CAPSULES_DIR).free >= size_bytes + reserve
+
+
+class _ProgressReader:
+    def __init__(self, file_obj, total_bytes: int, callback):
+        self.file_obj = file_obj
+        self.total_bytes = total_bytes
+        self.callback = callback
+        self.bytes_read = 0
+        self.started_at = time.monotonic()
+        self.last_report_at = 0.0
+
+    def read(self, size: int = -1):
+        chunk = self.file_obj.read(size)
+        if chunk:
+            self.bytes_read += len(chunk)
+        now = time.monotonic()
+        if not chunk or now - self.last_report_at >= 0.25:
+            elapsed = max(now - self.started_at, 0.001)
+            self.callback(
+                self.bytes_read,
+                self.total_bytes,
+                self.bytes_read / elapsed,
+            )
+            self.last_report_at = now
+        return chunk
 
 
 def _check_shared_token() -> tuple[bool, str | None]:
@@ -486,6 +540,25 @@ def _write_manifest(capsule_dir: Path, manifest: dict):
     )
 
 
+def _finalize_imported_capsule(
+    final_dir: Path,
+    manifest: dict,
+    update_manifest=None,
+) -> dict:
+    """Finish an imported capsule or remove the newly published directory."""
+    try:
+        if update_manifest:
+            update_manifest(manifest)
+        _write_manifest(final_dir, manifest)
+        capsule = _capsule_from_dir(final_dir)
+        if not capsule:
+            raise ValueError("导入后的胶囊 manifest 无法读取")
+        return capsule
+    except Exception:
+        shutil.rmtree(final_dir, ignore_errors=True)
+        raise
+
+
 def _safe_filename_stem(name: str) -> str:
     cleaned = "".join("_" if ch in '<>:"/\\|?*' or ord(ch) < 32 else ch for ch in name.strip())
     cleaned = cleaned.rstrip(" .")
@@ -560,6 +633,36 @@ def _normalize_plugin_name(name: str) -> str:
 def _plugin_tokens(name: str) -> set[str]:
     normalized = _normalize_plugin_name(name)
     return {token for token in normalized.split() if len(token) >= 3 and not token.isdigit()}
+
+
+_COCKOS_BUILTIN_PLUGINS = {
+    "readelay",
+    "reacomp",
+    "reacontrolmidi",
+    "reaeq",
+    "reafir",
+    "reagate",
+    "reainsert",
+    "realimit",
+    "reapitch",
+    "reasamplomatic5000",
+    "reasamplomatic 5000",
+    "reasurround",
+    "reasurroundpan",
+    "reasynth",
+    "reatune",
+    "reaverb",
+    "reaverbate",
+    "reastream",
+    "reaxcomp",
+}
+
+
+def _is_cockos_builtin_plugin(name: str) -> bool:
+    normalized = _normalize_plugin_name(name)
+    if normalized in _COCKOS_BUILTIN_PLUGINS:
+        return True
+    return "(cockos)" in str(name or "").lower() and normalized.startswith("rea")
 
 
 def _is_ignored_plugin_name(name: str) -> bool:
@@ -655,10 +758,15 @@ def _load_plugin_inventory() -> dict:
 
 
 def _plugin_available(required_name: str, installed: set[str]) -> bool:
+    if _is_cockos_builtin_plugin(required_name):
+        return True
     normalized = _normalize_plugin_name(required_name)
     if not normalized:
         return True
     if normalized in installed:
+        return True
+    compact = normalized.replace(" ", "")
+    if compact and any(compact == name.replace(" ", "") for name in installed):
         return True
     required_tokens = _plugin_tokens(required_name)
     for name in installed:
@@ -687,7 +795,17 @@ def _capsule_plugin_status(plugin_list: list) -> dict:
     if not unique_required:
         return {"total": 0, "available": 0, "missing": 0, "unknown": 0, "missing_plugins": [], "inventory_available": bool(inventory.get("available"))}
     if not inventory.get("available"):
-        return {"total": len(unique_required), "available": 0, "missing": 0, "unknown": len(unique_required), "missing_plugins": [], "inventory_available": False}
+        builtin = [name for name in unique_required if _is_cockos_builtin_plugin(name)]
+        unknown = [name for name in unique_required if name not in builtin]
+        return {
+            "total": len(unique_required),
+            "available": len(builtin),
+            "missing": 0,
+            "unknown": len(unknown),
+            "missing_plugins": [],
+            "present_plugins": builtin[:20],
+            "inventory_available": False,
+        }
 
     missing = [name for name in unique_required if not _plugin_available(name, installed)]
     present = [name for name in unique_required if name not in missing]
@@ -1250,10 +1368,16 @@ def create_capsule():
         f = request.files["bundle"]
         try:
             manifest, final_dir, _size_bytes = extract_bundle(f.stream, CAPSULES_DIR)
+        except BundleConflictError as e:
+            return _err(str(e), 409)
         except ValueError as e:
             return _err(str(e), 400)
-        _write_manifest(final_dir, manifest)
-        return _ok(_capsule_from_dir(final_dir), message="胶囊已导入"), 201
+        try:
+            capsule = _finalize_imported_capsule(final_dir, manifest)
+        except Exception as e:
+            logger.exception("导入胶囊收尾失败，已回滚目录: %s", final_dir)
+            return _err(f"胶囊导入收尾失败: {e}", 500)
+        return _ok(capsule, message="胶囊已导入"), 201
 
     payload = request.get_json(silent=True) or {}
     name = payload.get("name")
@@ -1416,13 +1540,20 @@ def download_bundle(cap_id: str):
     cap = _capsule_from_dir(target)
     if not cap:
         return _err("manifest 读取失败", 500)
-    blob = build_bundle(cap, target, sender=network_info(PORT))
-    return send_file(
-        io.BytesIO(blob),
+    bundle_path = _temporary_bundle_path(f"download-{cap['uuid']}-")
+    try:
+        build_bundle_file(cap, target, bundle_path, sender=network_info(PORT))
+    except Exception:
+        bundle_path.unlink(missing_ok=True)
+        raise
+    response = send_file(
+        str(bundle_path),
         mimetype="application/zip",
         as_attachment=True,
         download_name=f"{cap['uuid']}.capsule.zip",
     )
+    response.call_on_close(lambda: bundle_path.unlink(missing_ok=True))
+    return response
 
 
 # ---------------------- Reaper 捕获 ----------------------
@@ -1937,6 +2068,12 @@ def p2p_request():
     capsule_name = data.get("capsule_name") or "胶囊"
     capsule_type = data.get("capsule_type") or ""
     size_bytes = data.get("size_bytes") or 0
+    try:
+        size_bytes = int(size_bytes)
+    except (TypeError, ValueError):
+        return _err("胶囊大小无效", 400)
+    if not _receive_has_disk_space(size_bytes):
+        return _err("磁盘空间不足或胶囊大小超出限制", 400)
     trusted_sender = False
     if sender_peer_id or sender_public_key or sender_signature:
         request_extra = {
@@ -2071,14 +2208,59 @@ def p2p_import():
                 return _err("确认令牌无效或未被接受", 403)
             del _pending_requests[token]
 
-    if "bundle" not in request.files:
-        return _err("缺少字段 bundle（zip 文件）", 400)
+    upload_stream = None
+    if "bundle" in request.files:
+        upload_stream = request.files["bundle"].stream
+    elif request.mimetype in {"application/zip", "application/octet-stream"}:
+        upload_stream = request.stream
+    if upload_stream is None:
+        return _err("缺少胶囊 ZIP 数据", 400)
 
-    f = request.files["bundle"]
-    bundle_bytes = f.read()
-    bundle_sha256 = hashlib.sha256(bundle_bytes).hexdigest()
     sender_ip = request.headers.get("X-Capsule-Peer-IP") or request.remote_addr or "unknown"
     sender_name = request.headers.get("X-Capsule-Peer-Name") or sender_ip
+    capsule_name = unquote(request.headers.get("X-Capsule-Name", "").strip()) or "胶囊"
+    transfer_task_id = request.headers.get("X-Capsule-Task-ID", "").strip()
+
+    bundle_path = _temporary_bundle_path("receive-")
+    @after_this_request
+    def cleanup_received_bundle(response):
+        bundle_path.unlink(missing_ok=True)
+        return response
+
+    receive_started_at = time.monotonic()
+    receive_last_report_at = [0.0]
+
+    def report_receive_progress(received_bytes: int, force: bool = False):
+        now = time.monotonic()
+        if not force and now - receive_last_report_at[0] < 0.25:
+            return
+        total_bytes = request.content_length or 0
+        elapsed = max(now - receive_started_at, 0.001)
+        _notify_sse({
+            "type": "transfer_progress",
+            "direction": "receive",
+            "task_id": transfer_task_id,
+            "capsule_name": capsule_name,
+            "peer_name": sender_name,
+            "phase": "transferring",
+            "bytes_transferred": received_bytes,
+            "total_bytes": total_bytes,
+            "bytes_per_second": round(received_bytes / elapsed),
+            "progress": round(received_bytes * 100 / total_bytes, 1) if total_bytes else None,
+        })
+        receive_last_report_at[0] = now
+
+    try:
+        size_bytes, bundle_sha256 = copy_stream_to_file(
+            upload_stream,
+            bundle_path,
+            progress_callback=report_receive_progress,
+        )
+        report_receive_progress(size_bytes, force=True)
+    except ValueError as e:
+        return _err(str(e), 400)
+    except OSError as e:
+        return _err(f"接收文件失败: {e}", 507)
     sender_peer_id = request.headers.get("X-Capsule-Peer-ID", "").strip()
     sender_public_key = request.headers.get("X-Capsule-Peer-Public-Key", "").strip()
     sender_signature = request.headers.get("X-Capsule-Peer-Signature", "").strip()
@@ -2087,20 +2269,25 @@ def p2p_import():
     sent_bundle_sha256 = request.headers.get("X-Capsule-Bundle-SHA256", "").strip()
     trusted_sender = False
     if sent_bundle_sha256 and sent_bundle_sha256 != bundle_sha256:
+        bundle_path.unlink(missing_ok=True)
         return _err("bundle hash mismatch", 400)
     if sender_peer_id or sender_public_key or sender_signature:
         accept_token = request.headers.get("X-Accept-Token", "").strip()
         import_extra = {"accept_token": accept_token, "bundle_sha256": bundle_sha256}
         if not (sender_peer_id and sender_public_key and sender_signature and sender_nonce and sender_timestamp):
+            bundle_path.unlink(missing_ok=True)
             return _err("发送方身份签名不完整", 401)
         ok, verify_msg = _verify_peer_payload(sender_public_key, "p2p_import", sender_nonce, sender_timestamp, sender_signature, import_extra)
         if not ok:
+            bundle_path.unlink(missing_ok=True)
             return _err(verify_msg, 401)
         if hashlib.sha256(sender_public_key.encode("utf-8")).hexdigest()[:32] != sender_peer_id:
+            bundle_path.unlink(missing_ok=True)
             return _err("发送方 peer_id 与公钥不匹配", 401)
         contacts = _normalize_contacts(_load_contacts())
         known = _find_contact_by_identity(contacts, sender_peer_id, sender_public_key)
         if known and known.get("_identity_mismatch"):
+            bundle_path.unlink(missing_ok=True)
             return _err("发送方身份与已保存联系人不匹配", 403)
         if known:
             known["last_ip"] = sender_ip
@@ -2112,17 +2299,37 @@ def p2p_import():
     peer_label = sender_name if sender_name == sender_ip else f"{sender_name} ({sender_ip})"
 
     try:
-        manifest, final_dir, size_bytes = extract_bundle(io.BytesIO(bundle_bytes), CAPSULES_DIR)
+        manifest, final_dir, size_bytes = import_bundle_file(bundle_path, CAPSULES_DIR)
+    except BundleConflictError as e:
+        return _err(str(e), 409)
     except ValueError as e:
         return _err(str(e), 400)
+    finally:
+        bundle_path.unlink(missing_ok=True)
 
-    manifest.setdefault("capsule", {})["source_peer"] = peer_label
-    if sender_peer_id:
-        manifest.setdefault("capsule", {})["source_peer_id"] = sender_peer_id
-        manifest.setdefault("capsule", {})["source_peer_trusted"] = trusted_sender
-    _write_manifest(final_dir, manifest)
-    cap = _capsule_from_dir(final_dir)
+    def update_source(imported_manifest: dict):
+        imported_manifest.setdefault("capsule", {})["source_peer"] = peer_label
+        if sender_peer_id:
+            imported_manifest.setdefault("capsule", {})["source_peer_id"] = sender_peer_id
+            imported_manifest.setdefault("capsule", {})["source_peer_trusted"] = trusted_sender
+
+    try:
+        cap = _finalize_imported_capsule(final_dir, manifest, update_source)
+    except Exception as e:
+        logger.exception("接收胶囊收尾失败，已回滚目录: %s", final_dir)
+        return _err(f"胶囊入库失败: {e}", 500)
     logger.info("接收胶囊 %s 来自 %s (%d bytes)", cap.get("name"), peer_label, size_bytes)
+    _notify_sse({
+        "type": "transfer_progress",
+        "direction": "receive",
+        "task_id": transfer_task_id,
+        "capsule_name": cap.get("name") or capsule_name,
+        "peer_name": sender_name,
+        "phase": "completed",
+        "bytes_transferred": size_bytes,
+        "total_bytes": size_bytes,
+        "progress": 100,
+    })
     _notify_sse({"type": "capsule_received", "capsule": {"name": cap.get("name"), "source": peer_label}})
     return _ok(cap, message="已接收并入库"), 201
 
@@ -2131,6 +2338,7 @@ def p2p_import():
 def p2p_send():
     data = request.get_json(silent=True) or {}
     capsule_id = data.get("capsule_id")
+    transfer_task_id = str(data.get("task_id") or uuid_lib.uuid4())
     contact, resolved, resolve_error = _resolve_target_peer(data)
     if resolve_error:
         return _err(resolve_error, 403 if "已阻止发送" in resolve_error else 404)
@@ -2145,15 +2353,37 @@ def p2p_send():
     if not cap:
         return _err("胶囊文件目录缺失", 410)
 
+    def notify_transfer(phase: str, **extra):
+        _notify_sse({
+            "type": "transfer_progress",
+            "direction": "send",
+            "task_id": transfer_task_id,
+            "capsule_id": cap.get("uuid"),
+            "capsule_name": cap.get("name") or "胶囊",
+            "peer_name": target_name or target_ip,
+            "target_ip": target_ip,
+            "phase": phase,
+            **extra,
+        })
+
     self_info = network_info(PORT)
-    blob = build_bundle(cap, capsule_root, sender=self_info)
+    notify_transfer("preparing", progress=None)
+    bundle_path = _temporary_bundle_path(f"send-{cap['uuid']}-")
+    try:
+        build_bundle_file(cap, capsule_root, bundle_path, sender=self_info)
+        bundle_size = bundle_path.stat().st_size
+        bundle_sha256 = sha256_file(bundle_path)
+    except Exception:
+        bundle_path.unlink(missing_ok=True)
+        raise
     request_extra = {
         "capsule_id": cap.get("uuid") or "",
         "capsule_name": cap.get("name") or "",
         "capsule_type": cap.get("capsule_type") or "",
-        "size_bytes": len(blob),
+        "size_bytes": bundle_size,
     }
     request_signature = _sign_peer_payload("p2p_request", request_extra)
+    notify_transfer("waiting_for_acceptance", total_bytes=bundle_size, progress=None)
     try:
         req_resp = requests.post(
             f"http://{target_ip}:{target_port}/api/p2p/request",
@@ -2168,17 +2398,20 @@ def p2p_send():
                 "capsule_id": cap.get("uuid"),
                 "capsule_name": cap.get("name"),
                 "capsule_type": cap.get("capsule_type"),
-                "size_bytes": len(blob),
+                "size_bytes": bundle_size,
             },
             timeout=15,
         )
         req_body = req_resp.json()
     except Exception as e:
+        bundle_path.unlink(missing_ok=True)
         return _err(f"请求确认失败: {e}", 502)
 
     if req_resp.status_code == 403:
+        bundle_path.unlink(missing_ok=True)
         return _err("对方已关闭接收", 403)
     if not req_resp.ok:
+        bundle_path.unlink(missing_ok=True)
         return _err(f"请求确认失败: HTTP {req_resp.status_code}", 502)
 
     req_data = req_body.get("data", {})
@@ -2186,6 +2419,7 @@ def p2p_send():
     if not accept_token:
         request_id = req_data.get("request_id")
         if not request_id:
+            bundle_path.unlink(missing_ok=True)
             return _err("对方返回格式异常", 502)
         deadline = time.time() + _PENDING_TIMEOUT
         while time.time() < deadline:
@@ -2202,13 +2436,14 @@ def p2p_send():
                         accept_token = check_data.get("accept_token")
                         break
                     if status == "rejected":
+                        bundle_path.unlink(missing_ok=True)
                         return _err("对方拒绝了传输请求", 403)
             except Exception:
                 pass
         if not accept_token:
+            bundle_path.unlink(missing_ok=True)
             return _err("等待确认超时，对方未响应", 408)
 
-    bundle_sha256 = hashlib.sha256(blob).hexdigest()
     import_signature = _sign_peer_payload("p2p_import", {"accept_token": accept_token, "bundle_sha256": bundle_sha256})
     headers = {
         "X-Capsule-Peer-IP": self_info.get("ip", ""),
@@ -2220,22 +2455,47 @@ def p2p_send():
         "X-Capsule-Peer-Timestamp": import_signature["timestamp"],
         "X-Capsule-Bundle-SHA256": bundle_sha256,
         "X-Accept-Token": accept_token,
+        "X-Capsule-Task-ID": transfer_task_id,
+        "X-Capsule-Name": quote(str(cap.get("name") or ""), safe=""),
+        "Content-Type": "application/zip",
+        "Content-Length": str(bundle_size),
     }
     if SHARED_TOKEN:
         headers["X-Capsule-Token"] = SHARED_TOKEN
 
-    files = {"bundle": (f"{cap['uuid']}.capsule.zip", io.BytesIO(blob), "application/zip")}
     try:
-        resp = requests.post(
-            f"http://{target_ip}:{target_port}/api/p2p/import",
-            files=files,
-            headers=headers,
-            timeout=120,
-        )
+        with bundle_path.open("rb") as bundle_file:
+            progress_file = _ProgressReader(
+                bundle_file,
+                bundle_size,
+                lambda sent, total, speed: notify_transfer(
+                    "transferring",
+                    bytes_transferred=sent,
+                    total_bytes=total,
+                    bytes_per_second=round(speed),
+                    progress=round(sent * 100 / total, 1) if total else 0,
+                ),
+            )
+            resp = requests.post(
+                f"http://{target_ip}:{target_port}/api/p2p/import",
+                data=progress_file,
+                headers=headers,
+                timeout=120,
+            )
     except Exception as e:
+        notify_transfer("error", error=str(e))
         return _err(f"发送失败: {e}", 502)
+    finally:
+        bundle_path.unlink(missing_ok=True)
     if not resp.ok:
+        notify_transfer("error", error=f"HTTP {resp.status_code}")
         return _err(f"对方拒绝: HTTP {resp.status_code}", 502)
+    notify_transfer(
+        "completed",
+        bytes_transferred=bundle_size,
+        total_bytes=bundle_size,
+        progress=100,
+    )
 
     contacts = _normalize_contacts(_load_contacts())
     existing = None
@@ -2264,7 +2524,7 @@ def p2p_send():
         })
         _save_contacts(contacts)
 
-    return _ok({"bytes": len(blob), "remote": resp.json(), "resolved_ip": target_ip, "resolved_port": target_port}, message="已发送")
+    return _ok({"bytes": bundle_size, "remote": resp.json(), "resolved_ip": target_ip, "resolved_port": target_port}, message="已发送")
 
 
 # ---------------------- 设置 ----------------------

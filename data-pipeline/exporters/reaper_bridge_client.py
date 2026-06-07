@@ -63,6 +63,7 @@ class BridgeStatus:
     status: str = "unknown"
     error: str = ""
     export_phase: str = ""
+    capture_progress: Optional[Dict[str, Any]] = None
     last_result_debug: str = ""
     heartbeat: str = ""
     heartbeat_age_seconds: Optional[float] = None
@@ -85,6 +86,7 @@ class BridgeStatus:
             "status": self.status,
             "error": self.error,
             "export_phase": self.export_phase,
+            "capture_progress": self.capture_progress or {},
             "last_result_debug": self.last_result_debug,
             "heartbeat": self.heartbeat,
             "heartbeat_age_seconds": self.heartbeat_age_seconds,
@@ -207,6 +209,15 @@ class ReaperBridgeClient:
             version = v2_version or read("bridge_version")
             state = read("status") or "unknown"
             phase = read("export_phase")
+            capture_progress_raw = read("capture_progress")
+            capture_progress = {}
+            if capture_progress_raw:
+                try:
+                    parsed_progress = json.loads(capture_progress_raw)
+                    if isinstance(parsed_progress, dict):
+                        capture_progress = parsed_progress
+                except json.JSONDecodeError:
+                    capture_progress = {}
             last_result = read("last_result_debug")
             heartbeat = v2_heartbeat or read("heartbeat")
             bridge_exe_path = read("bridge_exe_path")
@@ -247,6 +258,7 @@ class ReaperBridgeClient:
                 status=state,
                 error=error,
                 export_phase=phase,
+                capture_progress=capture_progress,
                 last_result_debug=last_result,
                 heartbeat=heartbeat,
                 heartbeat_age_seconds=heartbeat_age,
@@ -325,6 +337,7 @@ class ReaperBridgeClient:
         self.set_extstate(result_key, "")
         self.set_extstate("last_result_debug", "")
         self.set_extstate("export_phase", "python sending command")
+        self.set_extstate("capture_progress", "")
         self.set_extstate("last_command_debug", json.dumps(command, ensure_ascii=False))
         self.set_extstate(command_key, json.dumps(command, ensure_ascii=False))
         try:
