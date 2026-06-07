@@ -87,6 +87,10 @@ fn default_channel() -> String {
     "stable".to_string()
 }
 
+fn json_text(raw: &str) -> &str {
+    raw.strip_prefix('\u{feff}').unwrap_or(raw)
+}
+
 fn app_dir() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("无法读取当前程序路径：{e}"))?;
     exe.parent()
@@ -105,7 +109,8 @@ fn load_update_config(dir: &Path) -> Result<UpdateConfig, String> {
     }
     let raw =
         fs::read_to_string(&path).map_err(|e| format!("读取 update-config.json 失败：{e}"))?;
-    serde_json::from_str(&raw).map_err(|e| format!("解析 update-config.json 失败：{e}"))
+    serde_json::from_str(json_text(&raw))
+        .map_err(|e| format!("解析 update-config.json 失败：{e}"))
 }
 
 fn parse_build_from_version(version: &str) -> u64 {
@@ -122,7 +127,7 @@ fn parse_build_from_version(version: &str) -> u64 {
 fn load_local_version(dir: &Path) -> LocalVersion {
     let path = dir.join(VERSION_FILE);
     if let Ok(raw) = fs::read_to_string(path) {
-        if let Ok(version) = serde_json::from_str::<LocalVersion>(&raw) {
+        if let Ok(version) = serde_json::from_str::<LocalVersion>(json_text(&raw)) {
             return version;
         }
     }
@@ -312,7 +317,8 @@ fn read_manifest_source(latest_source: &str) -> Result<LatestManifest, String> {
         fs::read_to_string(Path::new(latest_source))
             .map_err(|e| format!("读取 latest.json 失败：{e}"))?
     };
-    serde_json::from_str(&raw).map_err(|e| format!("解析 latest.json 失败：{e}"))
+    serde_json::from_str(json_text(&raw))
+        .map_err(|e| format!("解析 latest.json 失败：{e}"))
 }
 
 fn select_package(manifest: &LatestManifest) -> Result<PackageManifest, String> {
@@ -461,6 +467,11 @@ fn flash_taskbar(app: tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
     }
+}
+
+#[tauri::command]
+fn current_version() -> Result<LocalVersion, String> {
+    Ok(load_local_version(&app_dir()?))
 }
 
 #[tauri::command]
@@ -620,8 +631,17 @@ fn install_update(
 
     let run_dir = std::env::temp_dir().join("CapsuleLAN").join("updater-run");
     fs::create_dir_all(&run_dir).map_err(|e| format!("创建更新器临时目录失败：{e}"))?;
+    #[cfg(target_os = "windows")]
+    let run_updater = run_dir.join(format!(
+        "{}-capsule-maintenance.exe",
+        std::process::id()
+    ));
+    #[cfg(not(target_os = "windows"))]
     let run_updater = run_dir.join(format!("{}-{}", std::process::id(), updater_name));
+    // Portable ZIP downloads can mark the updater as internet-originated.
+    // Remove that marker from the temporary copy before Windows launches it.
     fs::copy(&updater, &run_updater).map_err(|e| format!("复制更新器失败：{e}"))?;
+    unblock_downloaded_file(&run_updater)?;
 
     let app_dir_arg = dir.to_string_lossy().to_string();
     let package_arg = package_path;
@@ -658,6 +678,24 @@ fn install_update(
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn unblock_downloaded_file(path: &Path) -> Result<(), String> {
+    let mut zone_stream = path.as_os_str().to_os_string();
+    zone_stream.push(":Zone.Identifier");
+    match fs::remove_file(PathBuf::from(zone_stream)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "Failed to remove the Windows download block from the updater: {error}"
+        )),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn unblock_downloaded_file(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -665,6 +703,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             notify_new_capsule,
             flash_taskbar,
+            current_version,
             check_update,
             download_update,
             install_update,

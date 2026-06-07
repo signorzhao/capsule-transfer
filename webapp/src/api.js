@@ -52,7 +52,19 @@ async function tauriInvoke(command, args = {}) {
     throw new Error('Automatic updates are available only in the desktop app.');
   }
   const { invoke } = await import('@tauri-apps/api/core');
-  return invoke(command, args);
+  try {
+    return await invoke(command, args);
+  } catch (error) {
+    if (error instanceof Error) throw error;
+    if (typeof error === 'string') throw new Error(error);
+    let message;
+    try {
+      message = JSON.stringify(error);
+    } catch {
+      message = String(error);
+    }
+    throw new Error(message || String(error));
+  }
 }
 
 export async function initializeApi() {
@@ -167,6 +179,7 @@ export const api = {
     jsonFetch('/settings', { method: 'PATCH', body: JSON.stringify(payload) }),
 
   checkUpdate: () => tauriInvoke('check_update'),
+  getCurrentVersion: () => tauriInvoke('current_version'),
   downloadUpdate: (payload) => tauriInvoke('download_update', payload),
   installUpdate: (payload) => tauriInvoke('install_update', payload),
 };

@@ -108,6 +108,7 @@ function Shell() {
   const toast = useToast();
   const [activeTab, setActiveTab] = useState('library');
   const [networkInfo, setNetworkInfo] = useState(null);
+  const [appVersion, setAppVersion] = useState('');
   const [serverOnline, setServerOnline] = useState(false);
   const [capsules, setCapsules] = useState([]);
   const [contacts, setContacts] = useState([]);
@@ -213,6 +214,12 @@ function Shell() {
 
   useEffect(() => {
     api.getReceiveMode().then((r) => setReceiveMode(r.data?.mode || 'confirm')).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    api.getCurrentVersion()
+      .then((info) => setAppVersion(info?.version || ''))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -647,7 +654,9 @@ function Shell() {
               <CapsuleLanLogo />
               <div>
                 <div className="text-sm font-bold tracking-wide text-white">Capsule LAN</div>
-                <div className="text-[10px] uppercase tracking-widest text-slate-600">Project Library</div>
+                <div className="text-[10px] uppercase tracking-widest text-slate-600">
+                  Project Library{appVersion ? ` · v${appVersion}` : ''}
+                </div>
               </div>
             </div>
             <nav className="flex items-center gap-1">
@@ -691,7 +700,7 @@ function Shell() {
           {activeTab === 'library' && <LibraryView capsules={capsules} onSend={handleSelectCapsuleForSend} onDelete={handleDeleteCapsule} onCreate={handleCreateCapsule} onRequestCreate={handleRequestCreateCapsule} isCheckingSetup={isCheckingCaptureSetup} onRename={handleRenameCapsule} onOpenRpp={handleOpenRpp} onOpenFolder={handleOpenFolder} />}
           {activeTab === 'contacts' && <ContactsView contacts={contacts} onlineContacts={onlineContacts} onSend={handleStartTransferTo} onDelete={handleDeleteContact} onPing={handlePingContact} showAddForm={showAddContact} setShowAddForm={setShowAddContact} onAdd={handleAddContact} />}
           {activeTab === 'transfer' && <TransferView capsules={capsules} contacts={contacts} selectedCapsules={selectedCapsules} setSelectedCapsules={setSelectedCapsules} targetContacts={targetContacts} setTargetContacts={setTargetContacts} tempPeer={tempPeer} setTempPeer={setTempPeer} showTempPeerForm={showTempPeerForm} setShowTempPeerForm={setShowTempPeerForm} isSending={isSending} onSend={handleSend} />}
-          {activeTab === 'settings' && <SettingsView networkInfo={networkInfo} apiBase={api.base} bridgeStatus={bridgeStatus} onRefreshBridge={refreshBridgeStatus} onOpenSetup={() => setShowSetupWizard(true)} />}
+          {activeTab === 'settings' && <SettingsView networkInfo={networkInfo} apiBase={api.base} appVersion={appVersion} bridgeStatus={bridgeStatus} onRefreshBridge={refreshBridgeStatus} onOpenSetup={() => setShowSetupWizard(true)} />}
         </main>
       </div>
       {captureStatus && <CaptureOverlayV2 status={captureStatus} onClose={() => setCaptureStatus(null)} />}
@@ -789,10 +798,8 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
     if (!name) return;
     try {
       setFolderError('');
-      const res = await api.createCapsuleFolder(name, createParentId);
-      const folder = res.data || res;
+      await api.createCapsuleFolder(name, createParentId);
       await refreshCustomFolders();
-      setSelectedFolder(`folder:${folder.id}`);
       setNewFolderName('');
       setIsCreatingFolder(false);
       setCreateParentId(null);
@@ -1000,8 +1007,8 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
       },
       { key: 'all', label: 'All Capsules', icon: Package, count: capsules.length, predicate: () => true },
       { key: 'local', label: 'Local Captures', icon: HardDrive, count: capsules.filter((cap) => !isReceived(cap)).length, predicate: (cap) => !isReceived(cap) },
-      { key: 'received', label: 'Received Capsules', icon: Inbox, count: capsules.filter(isReceived).length, predicate: isReceived },
-      { key: 'recent-received', label: 'Received This Week', icon: Clock, count: capsules.filter(isRecentReceived).length, predicate: isRecentReceived },
+      { key: 'received', label: 'Received', icon: Inbox, count: capsules.filter(isReceived).length, predicate: isReceived },
+      { key: 'recent-received', label: 'Received: 7 Days', icon: Clock, count: capsules.filter(isRecentReceived).length, predicate: isRecentReceived },
       { key: 'missing-plugins', label: 'Missing Plugins', icon: AlertTriangle, count: capsules.filter(hasMissingPlugins).length, predicate: hasMissingPlugins },
     ];
   }, [capsules, customFolders, descendantIdsByFolderId]);
@@ -1297,7 +1304,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
               className="min-w-0 flex-1 rounded border border-indigo-500/60 bg-[#0f1115] px-1.5 py-0.5 text-sm text-slate-100 focus:outline-none"
             />
           ) : (
-            <span className="min-w-0 flex-1 truncate text-sm">{folder.label}</span>
+            <span className="min-w-0 flex-1 truncate text-sm" title={folder.label}>{folder.label}</span>
           )}
           {isEditingFolder ? (
             <span className="flex shrink-0 items-center gap-1">
@@ -1955,7 +1962,7 @@ function SummaryRow({ label, value }) {
   return <div className="flex items-baseline justify-between"><span className="text-xs text-slate-600">{label}</span><span className="text-sm font-semibold text-slate-200">{value}</span></div>;
 }
 
-function SettingsView({ networkInfo, apiBase, bridgeStatus, onRefreshBridge, onOpenSetup }) {
+function SettingsView({ networkInfo, apiBase, appVersion, bridgeStatus, onRefreshBridge, onOpenSetup }) {
   const [checkingBridge, setCheckingBridge] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
   const [updateBusy, setUpdateBusy] = useState(false);
@@ -2042,7 +2049,10 @@ function SettingsView({ networkInfo, apiBase, bridgeStatus, onRefreshBridge, onO
       <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 mb-6">
         <div className="flex items-center justify-between gap-4">
           <div className="min-w-0">
-            <h3 className="text-sm font-bold text-slate-200">Software Update</h3>
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-bold text-slate-200">Software Update</h3>
+              {appVersion && <span className="rounded border border-[#315c70] bg-[#142027] px-2 py-0.5 font-mono text-[10px] text-[#75a8c0]">v{appVersion}</span>}
+            </div>
             <p className="text-xs text-slate-500 mt-1">
               {updateInfo ? `Current version ${updateInfo.current_version} · ${updateInfo.message}` : 'Check the configured update source.'}
             </p>
