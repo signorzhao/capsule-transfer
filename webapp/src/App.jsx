@@ -234,10 +234,12 @@ function Shell() {
       if (!alive) return;
       const state = status?.setup_state || '';
       const captureBusy = captureStatus && !['done', 'error'].includes(captureStatus.phase);
+      const shouldAutoOpen = ['NOT_CONFIGURED', 'MISMATCHED_REAPER', 'NEED_REPAIR'].includes(state)
+        || (state === 'NEED_BRIDGE_INSTALL' && !status?.confirmed_reaper_resource_path);
       if (!setupCheckedRef.current) {
         setupCheckedRef.current = true;
-        if (!captureBusy && state && state !== 'READY') setShowSetupWizard(true);
-      } else if (!captureBusy && lastSetupStateRef.current === 'READY' && state && state !== 'READY') {
+        if (!captureBusy && shouldAutoOpen) setShowSetupWizard(true);
+      } else if (!captureBusy && lastSetupStateRef.current === 'READY' && shouldAutoOpen) {
         setShowSetupWizard(true);
       }
       lastSetupStateRef.current = state;
@@ -319,7 +321,7 @@ function Shell() {
     try {
       const status = await refreshBridgeStatus();
       if (status?.setup_state !== 'READY') {
-        setShowSetupWizard(true);
+        if (status?.setup_state !== 'NEED_WEBUI') setShowSetupWizard(true);
         toast.info(status?.setup_message || 'Complete the REAPER setup first.');
         return false;
       }
@@ -411,7 +413,7 @@ function Shell() {
     const preflight = await refreshBridgeStatus();
     if (preflight?.setup_state !== 'READY') {
       setCaptureStatus(null);
-      setShowSetupWizard(true);
+      if (preflight?.setup_state !== 'NEED_WEBUI') setShowSetupWizard(true);
       toast.error(preflight?.setup_message || 'Complete the REAPER setup first.');
       return false;
     }
@@ -2093,7 +2095,7 @@ function SettingsView({ networkInfo, apiBase, appVersion, bridgeStatus, onRefres
 
   const bridgeOk = bridgeStatus?.setup_state === 'READY';
   const bridgeLabel = bridgeOk
-    ? `Confirmed v${bridgeStatus.bridge_version || ''}`
+    ? `Connected v${bridgeStatus.bridge_version || ''}`
     : bridgeStatus?.setup_message || 'REAPER setup is incomplete';
 
   const checkForUpdate = async () => {
@@ -2205,10 +2207,11 @@ function SettingsView({ networkInfo, apiBase, appVersion, bridgeStatus, onRefres
             <button onClick={refresh} disabled={checkingBridge} className="px-3 py-2 text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg disabled:opacity-40 shrink-0">{checkingBridge ? 'Checking...' : 'Recheck'}</button>
           </div>
           {bridgeStatus?.error && <div className="mt-3 text-xs text-amber-300 flex items-start space-x-2"><AlertTriangle size={14} className="mt-0.5 shrink-0" /><span>{bridgeStatus.error}</span></div>}
+          {bridgeStatus?.bridge_update_available && <div className="mt-3 text-xs text-sky-300">Bridge v{bridgeStatus.desired_bridge_version} is available. The current Bridge remains compatible, so capture is not blocked.</div>}
         </div>
         <button onClick={onOpenSetup} className="w-full px-4 py-3 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl flex items-center justify-center space-x-2">
           <Settings size={16} />
-          <span>{bridgeOk ? 'Reconfigure REAPER' : 'Open Setup Wizard'}</span>
+          <span>{bridgeOk ? 'Manage REAPER Connection' : 'Open Setup Wizard'}</span>
         </button>
       </div>
       <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 mb-6 space-y-3 text-sm">
@@ -2347,9 +2350,9 @@ function SetupWizard({ status, onClose, onRefresh }) {
               <div className="bg-[#0f1115] border border-slate-800 rounded-xl p-5">
                 <h3 className="text-sm font-bold text-slate-100 mb-3">2. Run the installer in the current REAPER</h3>
                 <div className="text-sm text-slate-400 leading-7">
-                  In REAPER, open Actions, choose Load ReaScript, then load and run:
+                  For the first installation, open Actions, choose Load ReaScript, then load and run:
                   <div className="mt-2 font-mono text-xs text-slate-200 bg-black/20 border border-slate-800 rounded-lg p-3 break-all">{current?.installer_script || 'install_capsule_bridge.lua'}</div>
-                  Bridge will be added to the current REAPER startup scripts and will run automatically next time.
+                  The installer keeps one canonical Action entry, replaces the installed files, and switches the running Bridge without requiring a REAPER restart. Compatible app updates do not require rerunning it.
                 </div>
                 <div className="flex flex-wrap items-center gap-3 mt-4">
                   <button onClick={openScriptFolder} className="px-4 py-2 text-sm bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg flex items-center gap-2"><FolderOpen size={15} />Open Script Folder</button>

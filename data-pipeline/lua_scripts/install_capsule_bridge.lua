@@ -32,6 +32,11 @@ local function CurrentScriptDir()
   return path:match("(.*[/\\])") or ""
 end
 
+local function CurrentScriptPath()
+  local src = debug.getinfo(1).source or ""
+  return NormalizePath(src:match("@(.*)$") or src)
+end
+
 local function StartupBlock(bridge_path)
   return
     "-- >>> Capsule Transfer Bridge >>>\n" ..
@@ -69,7 +74,20 @@ local function StartBridge(bridge_path)
   return true, ""
 end
 
+local function RegisterCanonicalInstaller(source_path, installed_path)
+  if not reaper.AddRemoveReaScript then
+    return
+  end
+
+  if NormalizePath(source_path):lower() ~= NormalizePath(installed_path):lower() then
+    pcall(reaper.AddRemoveReaScript, false, 0, source_path, true)
+  end
+  pcall(reaper.AddRemoveReaScript, false, 0, installed_path, true)
+  pcall(reaper.AddRemoveReaScript, true, 0, installed_path, true)
+end
+
 local function Main()
+  local installer_source_path = CurrentScriptPath()
   local bridge_path = reaper.GetExtState(SECTION, "install_bridge_source")
   if not bridge_path or bridge_path == "" then
     bridge_path = CurrentScriptDir() .. "capsule_bridge.lua"
@@ -95,6 +113,14 @@ local function Main()
     WriteResult(false, copy_err)
     return
   end
+
+  local installed_installer_path = install_dir .. "/install_capsule_bridge.lua"
+  local installer_copied, installer_copy_err = CopyFile(installer_source_path, installed_installer_path)
+  if not installer_copied then
+    WriteResult(false, installer_copy_err)
+    return
+  end
+  RegisterCanonicalInstaller(installer_source_path, installed_installer_path)
 
   local startup_path = scripts_dir .. "/__startup.lua"
   local marker_begin = "-- >>> Capsule Transfer Bridge >>>"
@@ -134,6 +160,8 @@ local function Main()
     wf:close()
   end
 
+  local reload_generation = tostring(reaper.time_precise and reaper.time_precise() or os.time())
+  reaper.SetExtState(SECTION, "bridge_reload_generation", reload_generation, false)
   local started, start_err = StartBridge(installed_bridge_path)
   if not started then
     WriteResult(false, start_err)

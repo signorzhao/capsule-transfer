@@ -73,6 +73,50 @@ class AppCoreTests(unittest.TestCase):
         self.assertEqual(status["unknown"], 1)
         self.assertIn("ReaLimit (Cockos)", status["present_plugins"])
 
+    def test_compatible_bridge_update_does_not_require_reconfiguration(self):
+        status = {
+            "webui_available": True,
+            "bridge_available": True,
+            "bridge_version": "1.0.7",
+            "bridge_resource_path": "C:/REAPER",
+            "bridge_instance_conflict": "stale diagnostic",
+        }
+        state, message = self.module._reaper_setup_state(
+            status,
+            "1.0.8",
+            {"confirmed_reaper_resource_path": "C:/REAPER"},
+        )
+        self.assertEqual(state, "READY")
+        self.assertIn("compatible", message)
+
+    def test_old_bridge_requires_upgrade(self):
+        status = {
+            "webui_available": True,
+            "bridge_available": True,
+            "bridge_version": "1.0.5",
+            "bridge_resource_path": "C:/REAPER",
+        }
+        state, _ = self.module._reaper_setup_state(
+            status,
+            "1.0.8",
+            {"confirmed_reaper_resource_path": "C:/REAPER"},
+        )
+        self.assertEqual(state, "NEED_REPAIR")
+
+    def test_missing_resource_path_keeps_confirmed_connection_ready(self):
+        status = {
+            "webui_available": True,
+            "bridge_available": True,
+            "bridge_version": "1.0.8",
+            "bridge_resource_path": "",
+        }
+        state, _ = self.module._reaper_setup_state(
+            status,
+            "1.0.8",
+            {"confirmed_reaper_resource_path": "C:/REAPER"},
+        )
+        self.assertEqual(state, "READY")
+
     def test_peer_signature_rejects_modified_payload(self):
         signed = self.module._sign_peer_payload(
             "p2p_request",

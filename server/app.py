@@ -1575,22 +1575,37 @@ def _desired_bridge_version() -> str:
     return ""
 
 
+def _bridge_version_tuple(value: str | None) -> tuple[int, ...]:
+    parts = re.findall(r"\d+", str(value or ""))
+    return tuple(int(part) for part in parts[:3])
+
+
 def _reaper_setup_state(status: dict, desired_bridge_version: str, cfg: dict) -> tuple[str, str]:
     if not status.get("webui_available"):
         return "NEED_WEBUI", "没有连接到 REAPER Web Interface。请打开你要用于 Capsule Transfer 的 REAPER，并启用 Web browser interface。"
-    if status.get("bridge_instance_conflict"):
+    if status.get("bridge_instance_conflict") and not status.get("bridge_available"):
         return "NEED_REPAIR", "检测到 REAPER Bridge 多实例冲突。请关闭多余的 REAPER，重启目标 REAPER 后重新检测。"
     if not status.get("bridge_available"):
         return "NEED_BRIDGE_INSTALL", "REAPER Web Interface 已连接，但 Capsule Transfer Bridge 尚未运行。请在当前 REAPER 中加载并运行安装脚本。"
-    if desired_bridge_version and status.get("bridge_version") and status.get("bridge_version") != desired_bridge_version:
+    bridge_version = status.get("bridge_version") or ""
+    if bridge_version and _bridge_version_tuple(bridge_version) < (1, 0, 6):
         return "NEED_REPAIR", "当前 REAPER Bridge 版本不是本机应用附带的版本。请在当前 REAPER 中重新运行安装脚本。"
 
     current_resource = status.get("bridge_resource_path") or ""
     confirmed_resource = cfg.get("confirmed_reaper_resource_path") or ""
-    if not current_resource:
+    if not current_resource and not confirmed_resource:
         return "NEED_REPAIR", "Bridge 未上报 REAPER 资源目录。请重启目标 REAPER 或重新运行安装脚本。"
+    if not current_resource and confirmed_resource:
+        return "READY", "REAPER Bridge is connected. The saved binding is retained while its resource path is temporarily unavailable."
     if not confirmed_resource:
         return "NOT_CONFIGURED", "Bridge 已连接。请确认这是你要用于 Capsule Transfer 的 REAPER，并保存绑定。"
+    if (
+        desired_bridge_version
+        and bridge_version
+        and bridge_version != desired_bridge_version
+        and _normalize_reaper_identity_path(current_resource) == _normalize_reaper_identity_path(confirmed_resource)
+    ):
+        return "READY", f"REAPER is connected with compatible Bridge v{bridge_version}. Bridge v{desired_bridge_version} is optional."
     if _normalize_reaper_identity_path(current_resource) != _normalize_reaper_identity_path(confirmed_resource):
         return "MISMATCHED_REAPER", "当前连接的 REAPER 资源目录与已保存设置不一致。请确认是否打开了错误的 REAPER。"
     return "READY", "REAPER 设置已确认，可以捕获胶囊。"
@@ -1627,6 +1642,13 @@ def _build_reaper_bridge_status(webui_port: int | None = None, include_diagnosti
     desired_bridge_version = _desired_bridge_version()
     status.update(diagnostics)
     state, message = _reaper_setup_state(status, desired_bridge_version, cfg)
+    bridge_version = status.get("bridge_version") or ""
+    bridge_update_available = bool(
+        state == "READY"
+        and desired_bridge_version
+        and bridge_version
+        and bridge_version != desired_bridge_version
+    )
     if state != "READY":
         logger.info(
             "REAPER setup state: state=%s webui=%s bridge=%s status=%s phase=%s heartbeat_age=%s error=%s",
@@ -1648,6 +1670,8 @@ def _build_reaper_bridge_status(webui_port: int | None = None, include_diagnosti
         "installer_script": str(lua_dir / "install_capsule_bridge.lua"),
         "installer_dir": str(lua_dir),
         "desired_bridge_version": desired_bridge_version,
+        "bridge_update_available": bridge_update_available,
+        "bridge_update_required": state == "NEED_REPAIR" and bool(bridge_version),
         "path_manager": path_manager,
         "env_export_dir": os.environ.get("CAPSULE_TRANSFER_EXPORT_DIR", ""),
         "setup_state": state,

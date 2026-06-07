@@ -3,15 +3,17 @@
 -- Install once, then keep REAPER open/minimized while Capsule Transfer sends commands.
 
 local SECTION = "capsule_transfer"
-local BRIDGE_VERSION = "1.0.7"
+local BRIDGE_VERSION = "1.0.8"
 local HEARTBEAT_STALE_SECONDS = 15
 local COMMAND_KEY = "command_v2"
 local RESULT_KEY = "result_v2"
 local HEARTBEAT_KEY = "heartbeat_v2"
 local VERSION_KEY = "bridge_version_v2"
 local RUNNING_KEY = "_CAPSULE_TRANSFER_BRIDGE_V2_RUNNING"
+local RUNNING_RELOAD_KEY = "_CAPSULE_TRANSFER_BRIDGE_V2_RELOAD_GENERATION"
 local INSTANCE_KEY = "bridge_instance_id"
 local CONFLICT_KEY = "bridge_instance_conflict"
+local RELOAD_KEY = "bridge_reload_generation"
 local PROCESS_DISABLE_ENV = "CAPSULE_TRANSFER_BRIDGE_DISABLED"
 local NO_SELECTION_GRACE_SECONDS = 8
 local seed = reaper.time_precise and math.floor(reaper.time_precise() * 1000000) or os.time()
@@ -42,23 +44,38 @@ if os.getenv(PROCESS_DISABLE_ENV) == "1" then
   return
 end
 
+local RELOAD_GENERATION = reaper.GetExtState(SECTION, RELOAD_KEY) or ""
+
 if _G[RUNNING_KEY] then
   local last_heartbeat = tonumber(reaper.GetExtState(SECTION, HEARTBEAT_KEY) or "")
   local status = reaper.GetExtState(SECTION, "status")
   local age = last_heartbeat and (os.time() - last_heartbeat) or nil
   local existing_instance = tostring(_G[RUNNING_KEY])
-  reaper.SetExtState(SECTION, CONFLICT_KEY, "existing=" .. existing_instance .. "; rejected=" .. INSTANCE_ID, false)
-  Diag("bridge_already_running", {
-    existing_instance_id = existing_instance,
-    rejected_instance_id = INSTANCE_ID,
-    status = status,
-    heartbeat_age = age or "",
-  })
-  if status == "exporting" or (age and age >= 0 and age <= HEARTBEAT_STALE_SECONDS) then
+  local reload_requested = RELOAD_GENERATION ~= ""
+    and tostring(_G[RUNNING_RELOAD_KEY] or "") ~= RELOAD_GENERATION
+    and status ~= "exporting"
+  if not reload_requested then
+    reaper.SetExtState(SECTION, CONFLICT_KEY, "existing=" .. existing_instance .. "; rejected=" .. INSTANCE_ID, false)
+    Diag("bridge_already_running", {
+      existing_instance_id = existing_instance,
+      rejected_instance_id = INSTANCE_ID,
+      status = status,
+      heartbeat_age = age or "",
+    })
+  end
+  if not reload_requested and (status == "exporting" or (age and age >= 0 and age <= HEARTBEAT_STALE_SECONDS)) then
     return
+  end
+  if reload_requested then
+    Diag("bridge_hot_reload", {
+      previous_instance_id = existing_instance,
+      replacement_instance_id = INSTANCE_ID,
+      generation = RELOAD_GENERATION,
+    })
   end
 end
 _G[RUNNING_KEY] = INSTANCE_ID
+_G[RUNNING_RELOAD_KEY] = RELOAD_GENERATION
 _CAPSULE_TRANSFER_BRIDGE_RUNNING = true
 reaper.SetExtState(SECTION, INSTANCE_KEY, INSTANCE_ID, false)
 reaper.SetExtState(SECTION, CONFLICT_KEY, "", false)
