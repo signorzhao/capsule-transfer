@@ -762,8 +762,15 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
   const parseCapsuleDate = (value) => {
     if (!value) return null;
     const raw = String(value);
-    const date = new Date(raw.endsWith('Z') ? raw : `${raw}Z`);
+    const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(raw);
+    const date = new Date(hasTimezone ? raw : `${raw}Z`);
     return Number.isNaN(date.getTime()) ? null : date;
+  };
+  const formatCapsuleDate = (value) => {
+    const date = parseCapsuleDate(value);
+    if (!date) return 'Unknown';
+    const pad = (part) => String(part).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
   };
   const isReceived = (cap) => Boolean(cap.source_peer);
   const isRecentReceived = (cap) => {
@@ -1454,11 +1461,12 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
           </aside>
 
           <section className="min-h-0 rounded-lg border border-[#20262a] bg-[#0b0e10] overflow-hidden flex flex-col">
-            <div className="h-11 px-4 grid grid-cols-[minmax(160px,1fr)_80px_90px_64px_minmax(110px,0.8fr)] items-center gap-3 border-b border-slate-800 bg-[#151a21] text-[11px] font-bold uppercase tracking-wider text-slate-500">
+            <div className="h-11 px-4 grid grid-cols-[minmax(150px,1fr)_76px_84px_60px_116px_minmax(100px,0.7fr)] items-center gap-3 border-b border-slate-800 bg-[#151a21] text-[11px] font-bold uppercase tracking-wider text-slate-500">
               <span>Name</span>
               <span>Source</span>
               <span>Plugins</span>
               <span>Size</span>
+              <span>Created</span>
               <span>Collections</span>
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
@@ -1497,7 +1505,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
                       setDraggingId(null);
                       setDragOverFolder(null);
                     }}
-                    className={`group min-h-[48px] px-4 grid grid-cols-[minmax(160px,1fr)_80px_90px_64px_minmax(110px,0.8fr)] items-center gap-3 border-b border-slate-800/70 cursor-grab transition-colors active:cursor-grabbing ${draggingId === cap.id ? 'opacity-60' : ''} ${selected ? 'bg-indigo-500/10 ring-1 ring-inset ring-indigo-500/30' : 'bg-[#11151b] hover:bg-[#171d25]'}`}
+                    className={`group min-h-[48px] px-4 grid grid-cols-[minmax(150px,1fr)_76px_84px_60px_116px_minmax(100px,0.7fr)] items-center gap-3 border-b border-slate-800/70 cursor-grab transition-colors active:cursor-grabbing ${draggingId === cap.id ? 'opacity-60' : ''} ${selected ? 'bg-indigo-500/10 ring-1 ring-inset ring-indigo-500/30' : 'bg-[#11151b] hover:bg-[#171d25]'}`}
                   >
                     <div className="min-w-0 flex items-center gap-3">
                       <button title={playingId === cap.id ? 'Pause preview' : 'Play preview'} onClick={(event) => stopAction(event, () => handlePlay(cap))} onDoubleClick={(event) => event.stopPropagation()} className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${playingId === cap.id ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-indigo-300 hover:bg-indigo-600/20'}`}>
@@ -1528,6 +1536,9 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
                     </div>
                     <div><PluginStatusBadge status={cap.plugin_status} /></div>
                     <div className="text-xs text-slate-400">{formatBytes(cap.size_bytes)}</div>
+                    <div title={parseCapsuleDate(cap.created_at)?.toLocaleString() || 'Creation time unavailable'} className="whitespace-nowrap text-[11px] text-slate-400">
+                      {formatCapsuleDate(cap.created_at)}
+                    </div>
                     <div className="min-w-0 flex flex-wrap items-center gap-1.5">
                       {folderLabels.length === 0 ? (
                         <span className="text-[11px] text-slate-600">Unsorted</span>
