@@ -129,6 +129,9 @@ function Shell() {
   const [showIncoming, setShowIncoming] = useState(false);
   const [bridgeStatus, setBridgeStatus] = useState(null);
   const [showSetupWizard, setShowSetupWizard] = useState(false);
+  const [showCaptureDebug, setShowCaptureDebug] = useState(() => localStorage.getItem('capsuleCaptureDebug') === '1');
+  const [captureDebugStatus, setCaptureDebugStatus] = useState(null);
+  const [captureDebugError, setCaptureDebugError] = useState('');
   const [isCheckingCaptureSetup, setIsCheckingCaptureSetup] = useState(false);
   const [autoReceiveConfirmStep, setAutoReceiveConfirmStep] = useState(0);
   const [isChangingReceiveMode, setIsChangingReceiveMode] = useState(false);
@@ -211,6 +214,18 @@ function Shell() {
     }
   }, []);
 
+  const refreshCaptureDebug = useCallback(async () => {
+    try {
+      const r = await api.getReaperBridgeStatus({ diagnostics: true });
+      setCaptureDebugStatus(r.data);
+      setCaptureDebugError('');
+      return r.data;
+    } catch (e) {
+      setCaptureDebugError(e.message);
+      return null;
+    }
+  }, []);
+
   useEffect(() => {
     refreshAll();
     const t = setInterval(refreshAll, 15000);
@@ -226,6 +241,21 @@ function Shell() {
       .then((info) => setAppVersion(info?.version || ''))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem('capsuleCaptureDebug', showCaptureDebug ? '1' : '0');
+    if (!showCaptureDebug) return undefined;
+    let alive = true;
+    const poll = async () => {
+      if (alive) await refreshCaptureDebug();
+    };
+    poll();
+    const interval = setInterval(poll, captureStatus && !['done', 'error'].includes(captureStatus.phase) ? 1000 : 3000);
+    return () => {
+      alive = false;
+      clearInterval(interval);
+    };
+  }, [showCaptureDebug, captureStatus, refreshCaptureDebug]);
 
   useEffect(() => {
     let alive = true;
@@ -753,10 +783,11 @@ function Shell() {
           {activeTab === 'library' && <LibraryView capsules={capsules} onSend={handleSelectCapsuleForSend} onDelete={handleDeleteCapsule} onCreate={handleCreateCapsule} onRequestCreate={handleRequestCreateCapsule} isCheckingSetup={isCheckingCaptureSetup} onRename={handleRenameCapsule} onOpenRpp={handleOpenRpp} onOpenFolder={handleOpenFolder} />}
           {activeTab === 'contacts' && <ContactsView contacts={contacts} onlineContacts={onlineContacts} onSend={handleStartTransferTo} onDelete={handleDeleteContact} onPing={handlePingContact} showAddForm={showAddContact} setShowAddForm={setShowAddContact} onAdd={handleAddContact} />}
           {activeTab === 'transfer' && <TransferView capsules={capsules} contacts={contacts} selectedCapsules={selectedCapsules} setSelectedCapsules={setSelectedCapsules} targetContacts={targetContacts} setTargetContacts={setTargetContacts} tempPeer={tempPeer} setTempPeer={setTempPeer} showTempPeerForm={showTempPeerForm} setShowTempPeerForm={setShowTempPeerForm} isSending={isSending} transferProgress={transferProgress} onSend={handleSend} />}
-          {activeTab === 'settings' && <SettingsView networkInfo={networkInfo} apiBase={api.base} appVersion={appVersion} bridgeStatus={bridgeStatus} onRefreshBridge={refreshBridgeStatus} onOpenSetup={() => setShowSetupWizard(true)} />}
+          {activeTab === 'settings' && <SettingsView networkInfo={networkInfo} apiBase={api.base} appVersion={appVersion} bridgeStatus={bridgeStatus} showCaptureDebug={showCaptureDebug} onToggleCaptureDebug={setShowCaptureDebug} onRefreshBridge={refreshBridgeStatus} onOpenSetup={() => setShowSetupWizard(true)} />}
         </main>
       </div>
       {captureStatus && <CaptureOverlayV2 status={captureStatus} onClose={() => setCaptureStatus(null)} />}
+      {showCaptureDebug && <CaptureDebugPanel status={captureDebugStatus || bridgeStatus} error={captureDebugError} captureStatus={captureStatus} onClose={() => setShowCaptureDebug(false)} onRefresh={refreshCaptureDebug} />}
       {showSetupWizard && <SetupWizard status={bridgeStatus} onClose={() => setShowSetupWizard(false)} onRefresh={refreshBridgeStatus} />}
       {showIncoming && pendingRequests.length > 0 && <IncomingRequestsOverlay requests={pendingRequests} onAccept={handleAcceptRequest} onReject={handleRejectRequest} onClose={() => setShowIncoming(false)} />}
       {autoReceiveConfirmStep > 0 && (
@@ -2083,7 +2114,7 @@ function SummaryRow({ label, value }) {
   return <div className="flex items-baseline justify-between"><span className="text-xs text-slate-600">{label}</span><span className="text-sm font-semibold text-slate-200">{value}</span></div>;
 }
 
-function SettingsView({ networkInfo, apiBase, appVersion, bridgeStatus, onRefreshBridge, onOpenSetup }) {
+function SettingsView({ networkInfo, apiBase, appVersion, bridgeStatus, showCaptureDebug, onToggleCaptureDebug, onRefreshBridge, onOpenSetup }) {
   const [checkingBridge, setCheckingBridge] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
   const [updateBusy, setUpdateBusy] = useState(false);
@@ -2223,6 +2254,22 @@ function SettingsView({ networkInfo, apiBase, appVersion, bridgeStatus, onRefres
           <Settings size={16} />
           <span>{bridgeOk ? 'Manage REAPER Connection' : 'Open Setup Wizard'}</span>
         </button>
+      </div>
+      <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 mb-6">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <h3 className="text-sm font-bold text-slate-200">Capture Debug Window</h3>
+            <p className="mt-1 text-xs leading-relaxed text-slate-500">
+              Shows Bridge phase, copy progress, preview diagnostics, and raw command/result state while capturing.
+            </p>
+          </div>
+          <button
+            onClick={() => onToggleCaptureDebug(!showCaptureDebug)}
+            className={`shrink-0 rounded-lg px-4 py-2 text-xs font-semibold ${showCaptureDebug ? 'bg-indigo-600 text-white hover:bg-indigo-500' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}
+          >
+            {showCaptureDebug ? 'Debug On' : 'Debug Off'}
+          </button>
+        </div>
       </div>
       <div className="bg-[#1a1d24] border border-slate-800 rounded-2xl p-6 mb-6 space-y-3 text-sm">
         <h3 className="text-sm font-bold text-slate-200 mb-4">Connected REAPER</h3>
@@ -2511,6 +2558,104 @@ function CaptureOverlayV2({ status, onClose }) {
             : <div className="h-full bg-indigo-500 rounded-full transition-[width] duration-300" style={{ width: `${capturePercent}%` }} />}
         </div>}
         {(isDone || isError) && <button onClick={onClose} className="mt-5 px-5 py-2 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg">Close</button>}
+      </div>
+    </div>
+  );
+}
+
+function parseDebugValue(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function compactDebugValue(value) {
+  const parsed = parseDebugValue(value);
+  if (parsed === null || parsed === undefined || parsed === '') return '';
+  const text = typeof parsed === 'string' ? parsed : JSON.stringify(parsed, null, 2);
+  return text.length > 1800 ? `${text.slice(0, 1800)}\n... truncated` : text;
+}
+
+function DebugRow({ label, value, mono = false }) {
+  const display = value === undefined || value === null || value === '' ? '—' : value;
+  return (
+    <div className="grid grid-cols-[108px_minmax(0,1fr)] gap-3 text-xs">
+      <div className="text-slate-600">{label}</div>
+      <div className={`min-w-0 break-words text-slate-300 ${mono ? 'font-mono text-[11px]' : ''}`}>{display}</div>
+    </div>
+  );
+}
+
+function CaptureDebugPanel({ status, error, captureStatus, onClose, onRefresh }) {
+  const [expanded, setExpanded] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const progress = status?.capture_progress || {};
+  const rawItems = [
+    ['Command', status?.command_v2 || status?.command || status?.last_command_debug],
+    ['Result', status?.result_v2 || status?.result || status?.last_result_debug],
+    ['Preview Render', status?.preview_render_debug],
+    ['Preview Search', status?.preview_search_debug],
+  ].filter(([, value]) => Boolean(value));
+
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      await onRefresh?.();
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  return (
+    <div className="fixed bottom-4 right-4 z-[70] w-[440px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-slate-700 bg-[#11151b]/95 shadow-2xl shadow-black/50 backdrop-blur">
+      <div className="flex items-center justify-between gap-3 border-b border-slate-800 bg-[#151a21] px-4 py-3">
+        <div className="min-w-0">
+          <div className="text-sm font-bold text-slate-100">Capture Debug</div>
+          <div className="mt-0.5 truncate text-[11px] text-slate-500">{captureStatus?.message || status?.setup_message || 'Bridge diagnostics'}</div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <button onClick={refresh} disabled={refreshing} className="rounded-md border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800 disabled:opacity-40">
+            {refreshing ? 'Refreshing...' : 'Refresh'}
+          </button>
+          <button onClick={onClose} className="flex h-7 w-7 items-center justify-center rounded-md text-slate-500 hover:bg-slate-800 hover:text-slate-200" title="Close debug window"><X size={14} /></button>
+        </div>
+      </div>
+      <div className="max-h-[70vh] overflow-y-auto custom-scrollbar p-4">
+        {error && <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{error}</div>}
+        <div className="space-y-2">
+          <DebugRow label="Setup" value={status?.setup_state || status?.status} />
+          <DebugRow label="WebUI" value={status?.webui_available ? `OK :${status?.webui_port || status?.detected_webui_port || 9000}` : 'Unavailable'} />
+          <DebugRow label="Bridge" value={status?.bridge_available ? `OK v${status?.bridge_version || ''}` : 'Unavailable'} />
+          <DebugRow label="Phase" value={status?.export_phase || captureStatus?.phase} mono />
+          <DebugRow label="Selected" value={status?.selected_item_count ?? 'Unknown'} />
+          <DebugRow label="Heartbeat" value={status?.heartbeat_age_seconds !== undefined && status?.heartbeat_age_seconds !== null ? `${Number(status.heartbeat_age_seconds).toFixed(1)}s ago` : ''} />
+          <DebugRow label="Progress" value={progress.phase ? `${progress.phase}${progress.current_file ? ` · ${progress.current_file}` : ''}` : ''} />
+          <DebugRow label="Files" value={progress.total ? `${progress.current || 0}/${progress.total}` : ''} />
+          <DebugRow label="Bytes" value={progress.bytes_total ? `${formatBytes(progress.bytes_done || 0)} / ${formatBytes(progress.bytes_total || 0)}` : ''} />
+          <DebugRow label="Error" value={status?.error} />
+        </div>
+        {rawItems.length > 0 && (
+          <div className="mt-4">
+            <button onClick={() => setExpanded((v) => !v)} className="text-xs font-semibold text-indigo-300 hover:text-indigo-200">
+              {expanded ? 'Hide raw diagnostics' : 'Show raw diagnostics'}
+            </button>
+            {expanded && <div className="mt-3 space-y-3">
+              {rawItems.map(([label, value]) => (
+                <div key={label} className="rounded-lg border border-slate-800 bg-[#0b0e10] p-3">
+                  <div className="mb-2 text-[11px] font-bold uppercase tracking-wider text-slate-500">{label}</div>
+                  <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-slate-300">{compactDebugValue(value)}</pre>
+                </div>
+              ))}
+            </div>}
+          </div>
+        )}
+        <div className="mt-4 text-[11px] leading-relaxed text-slate-600">
+          This window reads live Bridge EXTSTATE diagnostics. Leave it off during normal use if you do not need capture troubleshooting.
+        </div>
       </div>
     </div>
   );

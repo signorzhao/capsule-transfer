@@ -184,7 +184,10 @@ export const api = {
   rejectRequest: (id) => jsonFetch(`/p2p/reject/${id}`, { method: 'POST' }),
   get notificationsUrl() { return `${API_BASE}/events`; },
 
-  getReaperBridgeStatus: () => jsonFetch('/reaper/bridge/status', { timeoutMs: 12000 }),
+  getReaperBridgeStatus: (options = {}) => {
+    const diagnostics = Boolean(options.diagnostics);
+    return jsonFetch(`/reaper/bridge/status${diagnostics ? '?diagnostics=1' : ''}`, { timeoutMs: diagnostics ? 20000 : 12000 });
+  },
   pingReaperBridge: () => jsonFetch('/reaper/bridge/ping', { method: 'POST' }),
   confirmReaperBridge: (payload = {}) =>
     jsonFetch('/reaper/bridge/confirm', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 15000 }),
