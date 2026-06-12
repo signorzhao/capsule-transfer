@@ -31,6 +31,14 @@ local function Diag(event, fields)
     end
 end
 
+local function DiagnosticNow()
+    return reaper.time_precise and reaper.time_precise() or os.clock()
+end
+
+local function ElapsedMs(started)
+    return math.floor((DiagnosticNow() - started) * 1000 + 0.5)
+end
+
 local function BridgePhase(msg)
     if reaper and reaper.SetExtState then
         reaper.SetExtState("capsule_transfer", "export_phase", tostring(msg or ""), false)
@@ -1033,6 +1041,7 @@ local function RestoreCurrentProjectRenderState(state)
 end
 
 function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, hasMidiItems)
+    local previewStarted = DiagnosticNow()
     reaper.ShowConsoleMsg("\n[RenderPreviewAudioFromCurrentProject] start\n")
     reaper.ShowConsoleMsg("  output: " .. tostring(outputPath) .. "\n")
 
@@ -1081,6 +1090,7 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, ha
         reaper.GetSet_LoopTimeRange(true, false, previewStartTime, previewEndTime, false)
         SetProjectStringInfo("RENDER_FILE", renderDir)
         SetProjectStringInfo("RENDER_PATTERN", renderBase)
+        local render1xBefore = GetProjectNumericInfo("RENDER_1X")
         if string.match(renderPath, "%.ogg$") then
             SetProjectStringInfo("RENDER_FORMAT", OGG_RENDER_CONFIG)
         else
@@ -1108,6 +1118,8 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, ha
             render_pattern = tostring(renderBase or ""),
             boundsflag = tostring(GetProjectNumericInfo("RENDER_BOUNDSFLAG")),
             render_1x = tostring(GetProjectNumericInfo("RENDER_1X")),
+            render_1x_before = tostring(render1xBefore),
+            render_1x_requested = "2",
             has_midi_items = tostring(hasMidiItems),
             start_time = tostring(previewStartTime),
             end_time = tostring(previewEndTime)
@@ -1127,9 +1139,37 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, ha
             timing = "immediately_before_42230"
         })
         os.remove(renderPath)
+        local commandStarted = DiagnosticNow()
+        Diag("inline_render_command_start", {
+            method = renderMethod,
+            has_midi_items = tostring(hasMidiItems),
+            preview_duration_ms = tostring(math.floor((previewEndTime - previewStartTime) * 1000 + 0.5)),
+            render_1x = tostring(GetProjectNumericInfo("RENDER_1X")),
+            output = tostring(renderPath or "")
+        })
         reaper.Main_OnCommand(42230, 0)  -- Render with the current project's temporary preview settings.
+        local commandElapsedMs = ElapsedMs(commandStarted)
+        Diag("inline_render_command_done", {
+            method = renderMethod,
+            elapsed_ms = tostring(commandElapsedMs),
+            output_exists = tostring(PathExists(renderPath)),
+            output_size_bytes = tostring(GetFileSize(renderPath))
+        })
         local minRenderBytes = string.match(renderPath, "%.ogg$") and 1 or MIN_PREVIEW_OUTPUT_BYTES
+        local fileWaitStarted = DiagnosticNow()
+        Diag("inline_render_file_wait_start", {
+            timeout_ms = "10000",
+            stable_ms = "500",
+            min_size_bytes = tostring(minRenderBytes),
+            initial_size_bytes = tostring(GetFileSize(renderPath))
+        })
         local outputSize = WaitForStableFileSize(renderPath, minRenderBytes, 500, 10000)
+        local fileWaitElapsedMs = ElapsedMs(fileWaitStarted)
+        Diag("inline_render_file_wait_done", {
+            elapsed_ms = tostring(fileWaitElapsedMs),
+            output_size_bytes = tostring(outputSize),
+            reached_min_size = tostring(outputSize >= minRenderBytes)
+        })
         if outputSize >= minRenderBytes then
             renderOk = true
             renderRet = "output_exists=true; output_size_bytes=" .. tostring(outputSize)
@@ -1142,6 +1182,9 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, ha
             result = renderRet,
             output = tostring(renderPath or ""),
             output_size_bytes = tostring(outputSize),
+            command_elapsed_ms = tostring(commandElapsedMs),
+            file_wait_elapsed_ms = tostring(fileWaitElapsedMs),
+            total_elapsed_ms = tostring(ElapsedMs(previewStarted)),
             skipped_renderproject_api = "true"
         })
         if not renderOk then
@@ -1844,6 +1887,12 @@ end
 
 -- 生成新的 RPP 文件（不切换工程）
 function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, startTime, endTime, hasMidiItems)
+    local rppGenerationStarted = DiagnosticNow()
+    Diag("rpp_generation_start", {
+        capsule_name = tostring(capsuleName or ""),
+        render_preview = tostring(renderPreview),
+        has_midi_items = tostring(hasMidiItems)
+    })
     reaper.ShowConsoleMsg("\n=== 生成胶囊 RPP ===\n")
     
     -- 获取当前工程路径
@@ -1851,6 +1900,11 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
     local isTemporaryProject = (not currentProjPath or currentProjPath == "")
     local tempRppPath = nil
     
+    local saveStarted = DiagnosticNow()
+    Diag("rpp_save_project_start", {
+        source_path = tostring(currentProjPath or ""),
+        temporary_project = tostring(isTemporaryProject)
+    })
     if isTemporaryProject then
         -- 临时工程：先保存到临时文件
         reaper.ShowConsoleMsg("⚠ 检测到临时工程，先保存到临时文件\n")
@@ -1868,9 +1922,19 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
         reaper.ShowConsoleMsg("保存当前工程状态: " .. currentProjPath .. "\n")
         reaper.Main_SaveProject(0, false)
     end
+    Diag("rpp_save_project_done", {
+        elapsed_ms = tostring(ElapsedMs(saveStarted)),
+        source_path = tostring(currentProjPath or ""),
+        source_size_bytes = tostring(GetFileSize(currentProjPath))
+    })
     
     -- 读取 RPP 内容
     reaper.ShowConsoleMsg("读取 RPP: " .. currentProjPath .. "\n")
+    local readStarted = DiagnosticNow()
+    Diag("rpp_read_start", {
+        source_path = tostring(currentProjPath or ""),
+        source_size_bytes = tostring(GetFileSize(currentProjPath))
+    })
     local sourceFile = io.open(currentProjPath, "r")
     if not sourceFile then
         reaper.ShowConsoleMsg("✗ 无法读取 RPP\n")
@@ -1878,6 +1942,10 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
     end
     local content = sourceFile:read("*all")
     sourceFile:close()
+    Diag("rpp_read_done", {
+        elapsed_ms = tostring(ElapsedMs(readStarted)),
+        content_bytes = tostring(#content)
+    })
     
     -- ============================================================
     -- 步骤 1：收集需要保留的轨道（依赖追踪）+ 选中 Item 的 GUID
@@ -2025,6 +2093,12 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
         content = finalContent
         reaper.ShowConsoleMsg("  轨道路由号重映射完成\n")
     end
+    Diag("rpp_filter_tracks_done", {
+        total_elapsed_ms = tostring(ElapsedMs(rppGenerationStarted)),
+        kept_tracks = tostring(keptCount),
+        removed_tracks = tostring(removedTrackCount),
+        content_bytes = tostring(#content)
+    })
     
     -- ============================================================
     -- 步骤 3：删除未选中的 ITEM 块
@@ -2097,6 +2171,12 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
     end
     content = newContent
     reaper.ShowConsoleMsg("  删除了 " .. removedCount .. " 个未选中的 Items\n")
+    Diag("rpp_filter_items_done", {
+        total_elapsed_ms = tostring(ElapsedMs(rppGenerationStarted)),
+        removed_items = tostring(removedCount),
+        selected_items = tostring(numItems),
+        content_bytes = tostring(#content)
+    })
     
     -- 替换媒体路径为 Audio/文件名
     reaper.ShowConsoleMsg("替换媒体路径...\n")
@@ -2171,6 +2251,11 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
         end)
         reaper.ShowConsoleMsg("已将剩余相对路径转为绝对路径\n")
     end
+    Diag("rpp_rewrite_paths_done", {
+        total_elapsed_ms = tostring(ElapsedMs(rppGenerationStarted)),
+        replaced_paths = tostring(replacedCount),
+        content_bytes = tostring(#content)
+    })
 
     -- 设置渲染参数（OGG 格式，按时间选区渲染）
     if renderPreview then
@@ -2265,6 +2350,11 @@ RENDER_NORMALIZE 0
     local targetRPP = JoinPath(outputDir, capsuleName .. ".rpp")
     reaper.ShowConsoleMsg("写入新 RPP: " .. targetRPP .. "\n")
     
+    local writeStarted = DiagnosticNow()
+    Diag("rpp_write_start", {
+        target_path = tostring(targetRPP or ""),
+        content_bytes = tostring(#content)
+    })
     local targetFile = io.open(targetRPP, "w")
     if not targetFile then
         reaper.ShowConsoleMsg("✗ 无法写入新 RPP\n")
@@ -2276,6 +2366,12 @@ RENDER_NORMALIZE 0
     end
     targetFile:write(content)
     targetFile:close()
+    Diag("rpp_write_done", {
+        elapsed_ms = tostring(ElapsedMs(writeStarted)),
+        target_path = tostring(targetRPP or ""),
+        output_size_bytes = tostring(GetFileSize(targetRPP)),
+        total_elapsed_ms = tostring(ElapsedMs(rppGenerationStarted))
+    })
     
     -- 清理临时文件
     if tempRppPath then
