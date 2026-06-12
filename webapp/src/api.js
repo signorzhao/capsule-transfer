@@ -188,6 +188,7 @@ export const api = {
     const diagnostics = Boolean(options.diagnostics);
     return jsonFetch(`/reaper/bridge/status${diagnostics ? '?diagnostics=1' : ''}`, { timeoutMs: diagnostics ? 20000 : 12000 });
   },
+  getReaperCaptureProgress: () => jsonFetch('/reaper/bridge/status?capture=1', { timeoutMs: 2500 }),
   pingReaperBridge: () => jsonFetch('/reaper/bridge/ping', { method: 'POST' }),
   confirmReaperBridge: (payload = {}) =>
     jsonFetch('/reaper/bridge/confirm', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 15000 }),

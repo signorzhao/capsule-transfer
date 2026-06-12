@@ -1787,7 +1787,10 @@ def webui_export():
 
     expected_name = result.get("capsule_name")
     capsule_dir_path = Path(export_dir) / expected_name if expected_name else None
+    import_started_at = time.perf_counter()
+    import_timings: dict[str, float] = {}
 
+    stage_started_at = time.perf_counter()
     waited = 0.0
     while capsule_dir_path and waited < 5:
         metadata_file = capsule_dir_path / "metadata.json"
@@ -1796,21 +1799,25 @@ def webui_export():
             break
         time.sleep(0.3)
         waited += 0.3
+    import_timings["metadata_wait_ms"] = (time.perf_counter() - stage_started_at) * 1000
 
     imported = None
     if capsule_dir_path and capsule_dir_path.exists():
         metadata_file = capsule_dir_path / "metadata.json"
         if metadata_file.exists():
+            stage_started_at = time.perf_counter()
             try:
                 meta = json.loads(metadata_file.read_text("utf-8"))
             except Exception:
                 meta = {}
+            import_timings["metadata_read_ms"] = (time.perf_counter() - stage_started_at) * 1000
 
             cap_uuid = meta.get("uuid") or meta.get("id") or str(uuid_lib.uuid4())
             name = meta.get("name") or expected_name or capsule_dir_path.name
             final_target = capsule_dir_path
             preview_name = meta.get("preview_audio") or (meta.get("files") or {}).get("preview")
             preview_requested = bool(render_preview or result.get("preview_requested"))
+            stage_started_at = time.perf_counter()
             if preview_requested and preview_name:
                 preview_path = capsule_dir_path / preview_name
                 if preview_path.exists():
@@ -1834,6 +1841,7 @@ def webui_export():
                         preview_name = ""
                         result["preview_audio"] = ""
                         result["preview_note"] = "preview requested but output file was not found"
+            import_timings["preview_check_ms"] = (time.perf_counter() - stage_started_at) * 1000
 
             tech = meta.get("info", {}) or {}
             plugins = meta.get("plugins", {}) or {}
@@ -1863,8 +1871,24 @@ def webui_export():
                     "tracks_included": routing.get("tracks_included"),
                 },
             }
+            stage_started_at = time.perf_counter()
             _write_manifest(final_target, manifest)
+            import_timings["manifest_write_ms"] = (time.perf_counter() - stage_started_at) * 1000
+            stage_started_at = time.perf_counter()
             imported = _capsule_from_dir(final_target)
+            import_timings["capsule_scan_ms"] = (time.perf_counter() - stage_started_at) * 1000
+
+    import_timings["total_ms"] = (time.perf_counter() - import_started_at) * 1000
+    logger.info(
+        "Reaper capsule import timing: capsule=%s metadata_wait=%.1fms metadata_read=%.1fms preview_check=%.1fms manifest_write=%.1fms capsule_scan=%.1fms total=%.1fms",
+        expected_name,
+        import_timings.get("metadata_wait_ms", 0.0),
+        import_timings.get("metadata_read_ms", 0.0),
+        import_timings.get("preview_check_ms", 0.0),
+        import_timings.get("manifest_write_ms", 0.0),
+        import_timings.get("capsule_scan_ms", 0.0),
+        import_timings.get("total_ms", 0.0),
+    )
 
     resp_data = {"capsule_name": expected_name, "export_result": result}
     if imported:
@@ -1880,10 +1904,39 @@ def webui_export():
 def reaper_bridge_status():
     webui_port = int(request.args.get("webui_port") or load_config().get("webui_port", 9000))
     include_diagnostics = request.args.get("diagnostics") in {"1", "true", "yes"}
+    capture_progress_only = request.args.get("capture") in {"1", "true", "yes"}
+    if capture_progress_only:
+        phase = ""
+        progress = {}
+        error = ""
+        try:
+            from exporters.reaper_bridge_client import ReaperBridgeClient
+            client = ReaperBridgeClient(port=webui_port, timeout=0.5)
+            try:
+                phase = client.get_extstate("export_phase", timeout=0.5, attempts=1)
+            except Exception as exc:
+                error = str(exc)
+            try:
+                raw_progress = client.get_extstate("capture_progress", timeout=0.5, attempts=1)
+                parsed_progress = json.loads(raw_progress or "{}")
+                if isinstance(parsed_progress, dict):
+                    progress = parsed_progress
+            except Exception as exc:
+                if not error:
+                    error = str(exc)
+        except Exception as exc:
+            error = str(exc)
+        return _ok({
+            "export_phase": phase,
+            "capture_progress": progress,
+            "temporarily_unavailable": bool(error),
+            "error": error,
+        })
     status = _build_reaper_bridge_status(webui_port, include_diagnostics=include_diagnostics)
-    cfg = load_config()
-    cfg["reaper_setup_state"] = status.get("setup_state", "")
-    save_config(cfg)
+    if not include_diagnostics:
+        cfg = load_config()
+        cfg["reaper_setup_state"] = status.get("setup_state", "")
+        save_config(cfg)
     return _ok(status)
 
 

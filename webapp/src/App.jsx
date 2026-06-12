@@ -246,24 +246,28 @@ function Shell() {
     localStorage.setItem('capsuleCaptureDebug', showCaptureDebug ? '1' : '0');
     if (!showCaptureDebug) return undefined;
     let alive = true;
+    let timeoutId = null;
+    const captureBusy = captureStatus && !['done', 'error'].includes(captureStatus.phase);
     const poll = async () => {
-      if (alive) await refreshCaptureDebug();
+      if (!alive) return;
+      if (!captureBusy) await refreshCaptureDebug();
+      if (alive) timeoutId = setTimeout(poll, 5000);
     };
     poll();
-    const interval = setInterval(poll, captureStatus && !['done', 'error'].includes(captureStatus.phase) ? 1000 : 3000);
     return () => {
       alive = false;
-      clearInterval(interval);
+      if (timeoutId) clearTimeout(timeoutId);
     };
   }, [showCaptureDebug, captureStatus, refreshCaptureDebug]);
 
   useEffect(() => {
     let alive = true;
+    const captureBusy = captureStatus && !['done', 'error'].includes(captureStatus.phase);
     const checkSetup = async () => {
+      if (captureBusy) return;
       const status = await refreshBridgeStatus();
       if (!alive) return;
       const state = status?.setup_state || '';
-      const captureBusy = captureStatus && !['done', 'error'].includes(captureStatus.phase);
       const shouldAutoOpen = ['NOT_CONFIGURED', 'MISMATCHED_REAPER', 'NEED_REPAIR'].includes(state)
         || (state === 'NEED_BRIDGE_INSTALL' && !status?.confirmed_reaper_resource_path);
       if (!setupCheckedRef.current) {
@@ -481,7 +485,7 @@ function Shell() {
         if (phasePollInFlight) return;
         phasePollInFlight = true;
         try {
-          const status = await api.getReaperBridgeStatus();
+          const status = await api.getReaperCaptureProgress();
           if (!captureActive) return;
           const bridgePhase = status.data?.export_phase || '';
           const bridgeProgress = status.data?.capture_progress || {};
@@ -2593,7 +2597,8 @@ function DebugRow({ label, value, mono = false }) {
 function CaptureDebugPanel({ status, error, captureStatus, onClose, onRefresh }) {
   const [expanded, setExpanded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const progress = status?.capture_progress || {};
+  const captureBusy = captureStatus && !['done', 'error'].includes(captureStatus.phase);
+  const progress = captureStatus?.progress || status?.capture_progress || {};
   const rawItems = [
     ['Command', status?.command_v2 || status?.command || status?.last_command_debug],
     ['Result', status?.result_v2 || status?.result || status?.last_result_debug],
@@ -2602,6 +2607,7 @@ function CaptureDebugPanel({ status, error, captureStatus, onClose, onRefresh })
   ].filter(([, value]) => Boolean(value));
 
   const refresh = async () => {
+    if (captureBusy) return;
     setRefreshing(true);
     try {
       await onRefresh?.();
@@ -2618,8 +2624,8 @@ function CaptureDebugPanel({ status, error, captureStatus, onClose, onRefresh })
           <div className="mt-0.5 truncate text-[11px] text-slate-500">{captureStatus?.message || status?.setup_message || 'Bridge diagnostics'}</div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <button onClick={refresh} disabled={refreshing} className="rounded-md border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800 disabled:opacity-40">
-            {refreshing ? 'Refreshing...' : 'Refresh'}
+          <button onClick={refresh} disabled={refreshing || captureBusy} className="rounded-md border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800 disabled:opacity-40">
+            {captureBusy ? 'Live capture' : refreshing ? 'Refreshing...' : 'Refresh'}
           </button>
           <button onClick={onClose} className="flex h-7 w-7 items-center justify-center rounded-md text-slate-500 hover:bg-slate-800 hover:text-slate-200" title="Close debug window"><X size={14} /></button>
         </div>
@@ -2630,7 +2636,7 @@ function CaptureDebugPanel({ status, error, captureStatus, onClose, onRefresh })
           <DebugRow label="Setup" value={status?.setup_state || status?.status} />
           <DebugRow label="WebUI" value={status?.webui_available ? `OK :${status?.webui_port || status?.detected_webui_port || 9000}` : 'Unavailable'} />
           <DebugRow label="Bridge" value={status?.bridge_available ? `OK v${status?.bridge_version || ''}` : 'Unavailable'} />
-          <DebugRow label="Phase" value={status?.export_phase || captureStatus?.phase} mono />
+          <DebugRow label="Phase" value={captureBusy ? captureStatus?.message || captureStatus?.phase : status?.export_phase || captureStatus?.phase} mono />
           <DebugRow label="Selected" value={status?.selected_item_count ?? 'Unknown'} />
           <DebugRow label="Heartbeat" value={status?.heartbeat_age_seconds !== undefined && status?.heartbeat_age_seconds !== null ? `${Number(status.heartbeat_age_seconds).toFixed(1)}s ago` : ''} />
           <DebugRow label="Progress" value={progress.phase ? `${progress.phase}${progress.current_file ? ` · ${progress.current_file}` : ''}` : ''} />
@@ -2654,7 +2660,9 @@ function CaptureDebugPanel({ status, error, captureStatus, onClose, onRefresh })
           </div>
         )}
         <div className="mt-4 text-[11px] leading-relaxed text-slate-600">
-          This window reads live Bridge EXTSTATE diagnostics. Leave it off during normal use if you do not need capture troubleshooting.
+          {captureBusy
+            ? 'Full diagnostics polling is paused during capture to avoid competing with REAPER WebUI. Phase and progress remain live.'
+            : 'This window reads Bridge EXTSTATE diagnostics every five seconds without overlapping requests.'}
         </div>
       </div>
     </div>

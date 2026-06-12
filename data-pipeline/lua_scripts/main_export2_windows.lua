@@ -2016,9 +2016,9 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
     -- ============================================================
     reaper.ShowConsoleMsg("清理不相关的轨道...\n")
     
-    local newContent = ""
+    local newContentParts = {}
     local inTrack = false
-    local trackContent = ""
+    local trackContentParts = {}
     local trackDepth = 0
     local currentTrackNum = 0
     local removedTrackCount = 0
@@ -2030,9 +2030,10 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
             inTrack = true
             trackDepth = 1
             currentTrackNum = currentTrackNum + 1
-            trackContent = line .. "\n"
+            trackContentParts = { line, "\n" }
         elseif inTrack then
-            trackContent = trackContent .. line .. "\n"
+            trackContentParts[#trackContentParts + 1] = line
+            trackContentParts[#trackContentParts + 1] = "\n"
             if line:match("^%s*</TRACK>") then trackDepth = 0 end  -- 兼容 </TRACK> 结束格式
             if line:match("^%s*<") and not line:match("^%s*<[^>]*>%s*$") then
                 trackDepth = trackDepth + 1
@@ -2046,18 +2047,19 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
                     keptCount = keptCount + 1
                     local fileIdx0 = currentTrackNum - 1
                     oldIndexToNewIndex[fileIdx0] = keptCount - 1
-                    newContent = newContent .. trackContent
+                    newContentParts[#newContentParts + 1] = table.concat(trackContentParts)
                 else
                     removedTrackCount = removedTrackCount + 1
                 end
                 inTrack = false
-                trackContent = ""
+                trackContentParts = {}
             end
         else
-            newContent = newContent .. line .. "\n"
+            newContentParts[#newContentParts + 1] = line
+            newContentParts[#newContentParts + 1] = "\n"
         end
     end
-    content = newContent
+    content = table.concat(newContentParts)
     reaper.ShowConsoleMsg("  删除了 " .. removedTrackCount .. " 个不相关的轨道\n")
 
     -- 重映射轨道路由号：RPP 使用 AUXRECV（receive）、SEND/AUXRENDER（send），均为 0-based（State Chunk 文档）
@@ -2075,7 +2077,7 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
         content = content:gsub("(AUXSEND%s+)(%d+)", remapTrackIndex)
         content = content:gsub("(AUXRENDER%s+)(%d+)", remapTrackIndex)
         -- 删除引用不存在轨道的路由行（索引 >= 保留轨道数说明目标已被移除）
-        local finalContent = ""
+        local finalContentParts = {}
         for line in content:gmatch("([^\n]*)\n?") do
             local keepLine = true
             local auxrecvIdx = line:match("^%s*AUXRECV%s+(%d+)")
@@ -2087,10 +2089,11 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
                 end
             end
             if keepLine then
-                finalContent = finalContent .. line .. "\n"
+                finalContentParts[#finalContentParts + 1] = line
+                finalContentParts[#finalContentParts + 1] = "\n"
             end
         end
-        content = finalContent
+        content = table.concat(finalContentParts)
         reaper.ShowConsoleMsg("  轨道路由号重映射完成\n")
     end
     Diag("rpp_filter_tracks_done", {
@@ -2118,22 +2121,24 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
     
     -- 删除不包含选中媒体的 ITEM 块
     local removedCount = 0
-    local newContent = ""
+    local newContentParts = {}
     local inItem = false
-    local itemContent = ""
+    local itemContentParts = {}
     local itemDepth = 0
     
     for line in content:gmatch("([^\r\n]*)\r?\n?") do
         if line:match("^%s*<ITEM") then
             inItem = true
             itemDepth = 1
-            itemContent = line .. "\n"
+            itemContentParts = { line, "\n" }
         elseif inItem then
-            itemContent = itemContent .. line .. "\n"
+            itemContentParts[#itemContentParts + 1] = line
+            itemContentParts[#itemContentParts + 1] = "\n"
             if line:match("^%s*</ITEM>") then itemDepth = 0 end
             if line:match("^%s*<") then itemDepth = itemDepth + 1 end
             if line:match("^%s*>") then itemDepth = itemDepth - 1 end
             if itemDepth == 0 then
+                local itemContent = table.concat(itemContentParts)
                 local keepItem = false
                 -- 方法 1：IGUID 精确匹配
                 local iguid = itemContent:match("IGUID%s+({[^}]+})")
@@ -2158,18 +2163,19 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
                     end
                 end
                 if keepItem then
-                    newContent = newContent .. itemContent
+                    newContentParts[#newContentParts + 1] = itemContent
                 else
                     removedCount = removedCount + 1
                 end
                 inItem = false
-                itemContent = ""
+                itemContentParts = {}
             end
         else
-            newContent = newContent .. line .. "\n"
+            newContentParts[#newContentParts + 1] = line
+            newContentParts[#newContentParts + 1] = "\n"
         end
     end
-    content = newContent
+    content = table.concat(newContentParts)
     reaper.ShowConsoleMsg("  删除了 " .. removedCount .. " 个未选中的 Items\n")
     Diag("rpp_filter_items_done", {
         total_elapsed_ms = tostring(ElapsedMs(rppGenerationStarted)),

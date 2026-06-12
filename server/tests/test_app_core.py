@@ -393,6 +393,32 @@ class AppCoreTests(unittest.TestCase):
         )
         self.assertEqual(status.as_dict()["capture_progress"]["bytes_done"], 50)
 
+    def test_capture_progress_status_uses_lightweight_extstate_reads(self):
+        from exporters import reaper_bridge_client
+
+        def read_extstate(_client, key, timeout=None, attempts=3):
+            self.assertEqual(attempts, 1)
+            if key == "export_phase":
+                return "saving capsule: copying media"
+            if key == "capture_progress":
+                return '{"phase":"copying_media","current":2,"total":4}'
+            raise AssertionError(f"unexpected EXTSTATE key: {key}")
+
+        client = self.module.app.test_client()
+        with mock.patch.object(
+            reaper_bridge_client.ReaperBridgeClient,
+            "get_extstate",
+            autospec=True,
+            side_effect=read_extstate,
+        ):
+            response = client.get("/api/reaper/bridge/status?capture=1")
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        data = response.get_json()["data"]
+        self.assertEqual(data["export_phase"], "saving capsule: copying media")
+        self.assertEqual(data["capture_progress"]["current"], 2)
+        self.assertFalse(data["temporarily_unavailable"])
+
     def test_import_finalize_failure_rolls_back_published_directory(self):
         source = Path(self.app_dir.name) / "rollback-fixture"
         source.mkdir()
