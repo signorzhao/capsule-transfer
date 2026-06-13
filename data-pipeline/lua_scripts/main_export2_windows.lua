@@ -2275,7 +2275,6 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
         content = content:gsub('RENDER_FMT%s+[^\n]*\n?', '')
         content = content:gsub('RENDER_RANGE%s+[^\n]*\n?', '')
         content = content:gsub('RENDER_STEMS%s+[^\n]*\n?', '')
-        content = content:gsub('RENDER_CHANNELS%s+[^\n]*\n?', '')
         
         -- 删除所有旧的 RENDER_CFG 块（避免格式冲突）
         content = content:gsub('%s*<RENDER_CFG%s*\n%s*[%w%+%/=]+%s*\n%s*>', '')
@@ -2304,7 +2303,6 @@ RENDER_PATTERN %s
 RENDER_FMT 0 2 44100
 RENDER_RANGE 2 %.6f %.6f 0 1000
 RENDER_STEMS 0
-RENDER_CHANNELS 2
 RENDER_1X %d
 RENDER_ADDTOPROJ 0
 RENDER_DITHER 0

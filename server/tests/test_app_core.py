@@ -142,6 +142,7 @@ class AppCoreTests(unittest.TestCase):
         self.assertNotIn("SetTrackStateChunk", source)
         self.assertNotIn("SetMediaItemSelected", source)
         self.assertIn('SetProjectNumericInfo("RENDER_CHANNELS", 2)', source)
+        self.assertNotIn("RENDER_CHANNELS 2\nRENDER_1X", source)
         self.assertIn("local progressByteInterval = 16 * 1024 * 1024", source)
         self.assertIn('local waitMode = "skipped_output_ready"', source)
 
