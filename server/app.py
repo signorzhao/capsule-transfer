@@ -1687,6 +1687,20 @@ def _build_reaper_bridge_status(webui_port: int | None = None, include_diagnosti
     return status
 
 
+def _wait_for_capsule_metadata(
+    capsule_dir: Path | None,
+    timeout_seconds: float = 5.0,
+    poll_interval_seconds: float = 0.3,
+) -> Path | None:
+    if capsule_dir is None:
+        return None
+    metadata_file = capsule_dir / "metadata.json"
+    deadline = time.perf_counter() + timeout_seconds
+    while not metadata_file.exists() and time.perf_counter() < deadline:
+        time.sleep(poll_interval_seconds)
+    return metadata_file
+
+
 @app.route("/api/capsules/webui-export", methods=["OPTIONS", "POST"])
 def webui_export():
     if request.method == "OPTIONS":
@@ -1791,20 +1805,12 @@ def webui_export():
     import_timings: dict[str, float] = {}
 
     stage_started_at = time.perf_counter()
-    waited = 0.0
-    while capsule_dir_path and waited < 5:
-        metadata_file = capsule_dir_path / "metadata.json"
-        if metadata_file.exists():
-            time.sleep(0.3)
-            break
-        time.sleep(0.3)
-        waited += 0.3
+    metadata_file = _wait_for_capsule_metadata(capsule_dir_path)
     import_timings["metadata_wait_ms"] = (time.perf_counter() - stage_started_at) * 1000
 
     imported = None
     if capsule_dir_path and capsule_dir_path.exists():
-        metadata_file = capsule_dir_path / "metadata.json"
-        if metadata_file.exists():
+        if metadata_file and metadata_file.exists():
             stage_started_at = time.perf_counter()
             try:
                 meta = json.loads(metadata_file.read_text("utf-8"))

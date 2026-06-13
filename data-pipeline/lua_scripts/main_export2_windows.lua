@@ -855,11 +855,11 @@ local CURRENT_PROJECT_RENDER_NUMERIC_KEYS = {
 local OGG_RENDER_CONFIG = "dmdnbwAAAD8AgAAAAIAAAAAgAAAAAAEAAA=="
 
 local function CaptureProjectRenderState()
+    local started = DiagnosticNow()
     local state = {
         strings = {},
         numbers = {},
         tracks = {},
-        items = {},
     }
     for _, key in ipairs(CURRENT_PROJECT_RENDER_STRING_KEYS) do
         state.strings[key] = GetProjectStringInfo(key)
@@ -878,51 +878,31 @@ local function CaptureProjectRenderState()
     for i = 0, reaper.CountTracks(0) - 1 do
         local track = reaper.GetTrack(0, i)
         if track then
-            local ok, chunk = reaper.GetTrackStateChunk(track, "", false)
             table.insert(state.tracks, {
                 track = track,
-                chunk = ok and chunk or nil,
                 solo = reaper.GetMediaTrackInfo_Value(track, "I_SOLO"),
                 mute = reaper.GetMediaTrackInfo_Value(track, "B_MUTE"),
             })
         end
     end
 
-    for ti = 0, reaper.CountTracks(0) - 1 do
-        local track = reaper.GetTrack(0, ti)
-        if track then
-            for ii = 0, reaper.CountTrackMediaItems(track) - 1 do
-                local item = reaper.GetTrackMediaItem(track, ii)
-                if item then
-                    table.insert(state.items, {
-                        item = item,
-                        selected = reaper.IsMediaItemSelected(item),
-                    })
-                end
-            end
-        end
-    end
-
+    Diag("preview_render_state_captured", {
+        elapsed_ms = tostring(ElapsedMs(started)),
+        track_count = tostring(#state.tracks),
+        render_channels = tostring(state.numbers.RENDER_CHANNELS or 0)
+    })
     return state
 end
 
 local function RestoreProjectRenderState(state)
     if not state then return end
+    local started = DiagnosticNow()
     reaper.PreventUIRefresh(1)
     local ok, err = pcall(function()
         for _, entry in ipairs(state.tracks or {}) do
             if entry.track then
-                if entry.chunk then
-                    pcall(reaper.SetTrackStateChunk, entry.track, entry.chunk, false)
-                else
-                    pcall(reaper.SetMediaTrackInfo_Value, entry.track, "I_SOLO", entry.solo or 0)
-                    pcall(reaper.SetMediaTrackInfo_Value, entry.track, "B_MUTE", entry.mute or 0)
-                end
-            end
-        end
-        for _, entry in ipairs(state.items or {}) do
-            if entry.item then
-                pcall(reaper.SetMediaItemSelected, entry.item, entry.selected == true)
+                pcall(reaper.SetMediaTrackInfo_Value, entry.track, "I_SOLO", entry.solo or 0)
+                pcall(reaper.SetMediaTrackInfo_Value, entry.track, "B_MUTE", entry.mute or 0)
             end
         end
         for key, value in pairs(state.strings or {}) do
@@ -942,6 +922,12 @@ local function RestoreProjectRenderState(state)
     if not ok then
         Diag("restore_project_state_failed", { error = tostring(err or "") })
         reaper.ShowConsoleMsg("  restore project state failed: " .. tostring(err) .. "\n")
+    else
+        Diag("preview_render_state_restored", {
+            elapsed_ms = tostring(ElapsedMs(started)),
+            track_count = tostring(#(state.tracks or {})),
+            render_channels = tostring(GetProjectNumericInfo("RENDER_CHANNELS"))
+        })
     end
 end
 
@@ -1091,6 +1077,7 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, ha
         SetProjectStringInfo("RENDER_FILE", renderDir)
         SetProjectStringInfo("RENDER_PATTERN", renderBase)
         local render1xBefore = GetProjectNumericInfo("RENDER_1X")
+        local renderChannelsBefore = GetProjectNumericInfo("RENDER_CHANNELS")
         if string.match(renderPath, "%.ogg$") then
             SetProjectStringInfo("RENDER_FORMAT", OGG_RENDER_CONFIG)
         else
@@ -1099,6 +1086,7 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, ha
         SetProjectNumericInfo("RENDER_RANGE", 1)
         SetProjectNumericInfo("RENDER_BOUNDSFLAG", 2)
         SetProjectNumericInfo("RENDER_STEMS", 0)
+        SetProjectNumericInfo("RENDER_CHANNELS", 2)
         SetProjectNumericInfo("RENDER_1X", 2)
         SetProjectNumericInfo("RENDER_SETTINGS", 0)
         SetProjectNumericInfo("RENDER_TAILFLAG", 0)
@@ -1117,6 +1105,9 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, ha
             render_file = tostring(renderDir or ""),
             render_pattern = tostring(renderBase or ""),
             boundsflag = tostring(GetProjectNumericInfo("RENDER_BOUNDSFLAG")),
+            render_channels = tostring(GetProjectNumericInfo("RENDER_CHANNELS")),
+            render_channels_before = tostring(renderChannelsBefore),
+            render_channels_requested = "2",
             render_1x = tostring(GetProjectNumericInfo("RENDER_1X")),
             render_1x_before = tostring(render1xBefore),
             render_1x_requested = "2",
@@ -1157,16 +1148,23 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, ha
         })
         local minRenderBytes = string.match(renderPath, "%.ogg$") and 1 or MIN_PREVIEW_OUTPUT_BYTES
         local fileWaitStarted = DiagnosticNow()
-        Diag("inline_render_file_wait_start", {
-            timeout_ms = "10000",
-            stable_ms = "500",
-            min_size_bytes = tostring(minRenderBytes),
-            initial_size_bytes = tostring(GetFileSize(renderPath))
-        })
-        local outputSize = WaitForStableFileSize(renderPath, minRenderBytes, 500, 10000)
+        local initialOutputSize = GetFileSize(renderPath)
+        local outputSize = initialOutputSize
+        local waitMode = "skipped_output_ready"
+        if outputSize < minRenderBytes then
+            waitMode = "fallback_wait"
+            Diag("inline_render_file_wait_start", {
+                timeout_ms = "2000",
+                stable_ms = "100",
+                min_size_bytes = tostring(minRenderBytes),
+                initial_size_bytes = tostring(initialOutputSize)
+            })
+            outputSize = WaitForStableFileSize(renderPath, minRenderBytes, 100, 2000)
+        end
         local fileWaitElapsedMs = ElapsedMs(fileWaitStarted)
         Diag("inline_render_file_wait_done", {
             elapsed_ms = tostring(fileWaitElapsedMs),
+            mode = waitMode,
             output_size_bytes = tostring(outputSize),
             reached_min_size = tostring(outputSize >= minRenderBytes)
         })
@@ -1817,6 +1815,8 @@ function CopyMediaFiles(mediaFiles, audioDir)
     end
     local completed = 0
     local completedBytes = 0
+    local progressByteInterval = 16 * 1024 * 1024
+    local progressTimeInterval = 0.5
     
     for sourcePath, baseName in pairs(mediaFiles) do
         local targetName = targetNames[sourcePath] or baseName
@@ -1834,15 +1834,22 @@ function CopyMediaFiles(mediaFiles, audioDir)
             bytes_done = completedBytes,
             bytes_total = totalBytes
         })
+        local lastReportedFileBytes = 0
+        local lastReportedAt = DiagnosticNow()
         local copyOk = CopyFile(sourcePath, targetPath, function(fileBytes)
-            BridgeProgress({
-                phase = "copying_media",
-                current_file = targetName,
-                current = completed + 1,
-                total = total,
-                bytes_done = completedBytes + fileBytes,
-                bytes_total = totalBytes
-            })
+            local now = DiagnosticNow()
+            if fileBytes - lastReportedFileBytes >= progressByteInterval or now - lastReportedAt >= progressTimeInterval then
+                BridgeProgress({
+                    phase = "copying_media",
+                    current_file = targetName,
+                    current = completed + 1,
+                    total = total,
+                    bytes_done = completedBytes + fileBytes,
+                    bytes_total = totalBytes
+                })
+                lastReportedFileBytes = fileBytes
+                lastReportedAt = now
+            end
         end)
         
         -- 验证
@@ -2184,54 +2191,39 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
         content_bytes = tostring(#content)
     })
     
-    -- 替换媒体路径为 Audio/文件名
+    -- 替换媒体路径为 Audio/文件名。每条 FILE 行只解析一次，避免
+    -- 针对每个媒体文件重复扫描整个 RPP。
     reaper.ShowConsoleMsg("替换媒体路径...\n")
     local replacedCount = 0
-    
-    for origPath, newPath in pairs(pathMapping) do
-        local baseName = string.match(origPath, "([^/\\]+)$")
-        -- 搜索所有可能出现在 RPP 中的路径格式
-        local pathVariants = { origPath, "Audio/" .. baseName, "Audio\\" .. baseName, baseName }
-        
-        for _, variant in ipairs(pathVariants) do
-            local escaped = variant:gsub("([%(%)%.%+%-%*%?%[%^%$%%])", "%%%1")
-            escaped = escaped:gsub("\\", "\\\\")
-            local pattern = '(FILE%s+")' .. escaped .. '(")'
-            local replaced, count = string.gsub(content, pattern, '%1' .. newPath .. '%2')
-            if count > 0 then
-                content = replaced
-                replacedCount = replacedCount + count
-            end
-        end
+
+    local filePathLookup = {}
+    local baseNameCounts = {}
+    local baseNameTargets = {}
+
+    local function NormalizeMediaPath(path)
+        return tostring(path or ""):gsub("\\", "/"):lower()
     end
 
-    -- Windows RPP FILE lines often contain single backslashes. The pattern
-    -- replacement above can miss those paths, so rewrite FILE entries by
-    -- parsing the quoted value and matching normalized path variants.
-    local filePathLookup = {}
     for origPath, newPath in pairs(pathMapping) do
         local baseName = string.match(origPath, "([^/\\]+)$")
-        local slashPath = origPath:gsub("\\", "/")
-        local backslashPath = origPath:gsub("/", "\\")
-        filePathLookup[origPath] = newPath
-        filePathLookup[slashPath] = newPath
-        filePathLookup[backslashPath] = newPath
+        filePathLookup[NormalizeMediaPath(origPath)] = newPath
+        filePathLookup[NormalizeMediaPath(newPath)] = newPath
         if baseName then
-            filePathLookup[baseName] = newPath
-            filePathLookup["Audio/" .. baseName] = newPath
-            filePathLookup["Audio\\" .. baseName] = newPath
+            local key = baseName:lower()
+            baseNameCounts[key] = (baseNameCounts[key] or 0) + 1
+            baseNameTargets[key] = newPath
         end
     end
 
     content = content:gsub('(FILE%s+")([^"]-)(")', function(prefix, filePath, suffix)
-        local normalized = filePath:gsub("\\", "/")
-        local backslashed = filePath:gsub("/", "\\")
         local baseName = string.match(filePath, "([^/\\]+)$")
-        local replacement =
-            filePathLookup[filePath] or
-            filePathLookup[normalized] or
-            filePathLookup[backslashed] or
-            (baseName and filePathLookup[baseName])
+        local replacement = filePathLookup[NormalizeMediaPath(filePath)]
+        if not replacement and baseName then
+            local baseKey = baseName:lower()
+            if baseNameCounts[baseKey] == 1 then
+                replacement = baseNameTargets[baseKey]
+            end
+        end
         if replacement then
             replacedCount = replacedCount + 1
             return prefix .. replacement .. suffix
@@ -2283,6 +2275,7 @@ function GenerateCapsuleRPP(outputDir, capsuleName, pathMapping, renderPreview, 
         content = content:gsub('RENDER_FMT%s+[^\n]*\n?', '')
         content = content:gsub('RENDER_RANGE%s+[^\n]*\n?', '')
         content = content:gsub('RENDER_STEMS%s+[^\n]*\n?', '')
+        content = content:gsub('RENDER_CHANNELS%s+[^\n]*\n?', '')
         
         -- 删除所有旧的 RENDER_CFG 块（避免格式冲突）
         content = content:gsub('%s*<RENDER_CFG%s*\n%s*[%w%+%/=]+%s*\n%s*>', '')
@@ -2311,6 +2304,7 @@ RENDER_PATTERN %s
 RENDER_FMT 0 2 44100
 RENDER_RANGE 2 %.6f %.6f 0 1000
 RENDER_STEMS 0
+RENDER_CHANNELS 2
 RENDER_1X %d
 RENDER_ADDTOPROJ 0
 RENDER_DITHER 0

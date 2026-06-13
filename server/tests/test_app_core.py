@@ -117,6 +117,34 @@ class AppCoreTests(unittest.TestCase):
         )
         self.assertEqual(state, "READY")
 
+    def test_existing_capsule_metadata_returns_without_sleep(self):
+        capsule_dir = Path(self.app_dir.name) / "metadata-ready"
+        capsule_dir.mkdir()
+        metadata_file = capsule_dir / "metadata.json"
+        metadata_file.write_text("{}", encoding="utf-8")
+
+        with mock.patch.object(self.module.time, "sleep") as sleep:
+            result = self.module._wait_for_capsule_metadata(capsule_dir)
+
+        self.assertEqual(result, metadata_file)
+        sleep.assert_not_called()
+
+    def test_windows_capture_script_uses_lightweight_render_state(self):
+        script_path = (
+            SERVER_DIR.parent
+            / "data-pipeline"
+            / "lua_scripts"
+            / "main_export2_windows.lua"
+        )
+        source = script_path.read_text(encoding="utf-8")
+
+        self.assertNotIn("GetTrackStateChunk", source)
+        self.assertNotIn("SetTrackStateChunk", source)
+        self.assertNotIn("SetMediaItemSelected", source)
+        self.assertIn('SetProjectNumericInfo("RENDER_CHANNELS", 2)', source)
+        self.assertIn("local progressByteInterval = 16 * 1024 * 1024", source)
+        self.assertIn('local waitMode = "skipped_output_ready"', source)
+
     def test_peer_signature_rejects_modified_payload(self):
         signed = self.module._sign_peer_payload(
             "p2p_request",
