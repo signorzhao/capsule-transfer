@@ -1063,12 +1063,6 @@ function RenderPreviewAudioFromCurrentProject(outputPath, startTime, endTime, ha
     local renderOk = false
     local ok, err = pcall(function()
         BridgePhase("rendering preview: preparing current project")
-        reaper.Main_OnCommand(40101, 0)  -- Item: Set all media online.
-        forcedMediaOnline = true
-        Diag("preview_force_media_online", {
-            command_id = "40101",
-            timing = "before_inline_render_setup"
-        })
         reaper.PreventUIRefresh(1)
         isolatedTrackCount = ApplyInlinePreviewTrackIsolation(trackSet)
         reaper.PreventUIRefresh(-1)

@@ -129,6 +129,45 @@ class AppCoreTests(unittest.TestCase):
         self.assertEqual(result, metadata_file)
         sleep.assert_not_called()
 
+    def test_reaper_ready_status_cache_is_short_lived_and_port_scoped(self):
+        ready = {
+            "setup_state": "READY",
+            "selected_item_count": 3,
+            "webui_port": 9000,
+        }
+        self.module._cache_reaper_ready_status(9000, ready)
+
+        cached = self.module._get_cached_reaper_ready_status(9000)
+        self.assertEqual(cached["selected_item_count"], 3)
+        self.assertIsNone(self.module._get_cached_reaper_ready_status(8080))
+
+        with self.module._reaper_ready_cache_lock:
+            self.module._reaper_ready_cache["created_at"] = (
+                time.perf_counter()
+                - self.module._REAPER_READY_CACHE_SECONDS
+                - 0.1
+            )
+        self.assertIsNone(self.module._get_cached_reaper_ready_status(9000))
+
+    def test_reaper_status_builder_reuses_recent_ready_result(self):
+        cached = {
+            "setup_state": "READY",
+            "selected_item_count": 2,
+            "webui_port": 9000,
+        }
+        with mock.patch.object(
+            self.module,
+            "_get_cached_reaper_ready_status",
+            return_value=cached,
+        ):
+            result = self.module._build_reaper_bridge_status(
+                9000,
+                allow_cached_ready=True,
+            )
+
+        self.assertTrue(result["preflight_cached"])
+        self.assertEqual(result["selected_item_count"], 2)
+
     def test_windows_capture_script_uses_lightweight_render_state(self):
         script_path = (
             SERVER_DIR.parent
@@ -145,6 +184,8 @@ class AppCoreTests(unittest.TestCase):
         self.assertNotIn("RENDER_CHANNELS 2\nRENDER_1X", source)
         self.assertIn("local progressByteInterval = 16 * 1024 * 1024", source)
         self.assertIn('local waitMode = "skipped_output_ready"', source)
+        self.assertNotIn('timing = "before_inline_render_setup"', source)
+        self.assertIn('timing = "immediately_before_42230"', source)
 
     def test_peer_signature_rejects_modified_payload(self):
         signed = self.module._sign_peer_payload(

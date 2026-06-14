@@ -136,6 +136,9 @@ _sse_subscribers: list = []
 _sse_lock = threading.Lock()
 _plugin_inventory_cache: dict = {"expires_at": 0.0, "data": None}
 _plugin_inventory_lock = threading.Lock()
+_reaper_ready_cache: dict = {"port": None, "created_at": 0.0, "data": None}
+_reaper_ready_cache_lock = threading.Lock()
+_REAPER_READY_CACHE_SECONDS = 1.5
 
 def _configured_cors_origins() -> list[str]:
     env_origins = os.getenv("LAN_CAPSULE_ALLOWED_ORIGINS", "").strip()
@@ -1611,9 +1614,42 @@ def _reaper_setup_state(status: dict, desired_bridge_version: str, cfg: dict) ->
     return "READY", "REAPER 设置已确认，可以捕获胶囊。"
 
 
-def _build_reaper_bridge_status(webui_port: int | None = None, include_diagnostics: bool = False) -> dict:
+def _get_cached_reaper_ready_status(port: int) -> dict | None:
+    now = time.perf_counter()
+    with _reaper_ready_cache_lock:
+        cached = _reaper_ready_cache.get("data")
+        if (
+            not cached
+            or _reaper_ready_cache.get("port") != port
+            or now - float(_reaper_ready_cache.get("created_at", 0.0)) > _REAPER_READY_CACHE_SECONDS
+            or cached.get("setup_state") != "READY"
+        ):
+            return None
+        return dict(cached)
+
+
+def _cache_reaper_ready_status(port: int, status: dict) -> None:
+    if status.get("setup_state") != "READY":
+        return
+    with _reaper_ready_cache_lock:
+        _reaper_ready_cache["port"] = port
+        _reaper_ready_cache["created_at"] = time.perf_counter()
+        _reaper_ready_cache["data"] = dict(status)
+
+
+def _build_reaper_bridge_status(
+    webui_port: int | None = None,
+    include_diagnostics: bool = False,
+    allow_cached_ready: bool = False,
+) -> dict:
     cfg = load_config()
     port = int(webui_port or cfg.get("webui_port", 9000))
+    if allow_cached_ready and not include_diagnostics:
+        cached = _get_cached_reaper_ready_status(port)
+        if cached is not None:
+            cached["preflight_cached"] = True
+            return cached
+
     diagnostics = {}
     try:
         from exporters.reaper_bridge_client import ReaperBridgeClient
@@ -1683,7 +1719,10 @@ def _build_reaper_bridge_status(webui_port: int | None = None, include_diagnosti
         "confirmed_reaper_app_version": cfg.get("confirmed_reaper_app_version", ""),
         "confirmed_at": cfg.get("reaper_setup_confirmed_at", ""),
         "last_setup_state": cfg.get("reaper_setup_state", ""),
+        "preflight_cached": False,
     })
+    if not include_diagnostics:
+        _cache_reaper_ready_status(port, status)
     return status
 
 
@@ -1725,14 +1764,15 @@ def webui_export():
 
     logger.info("Reaper bridge export: type=%s preview=%s dir=%s", capsule_type, render_preview, export_dir)
 
-    preflight = _build_reaper_bridge_status(webui_port)
+    preflight = _build_reaper_bridge_status(webui_port, allow_cached_ready=True)
     logger.info(
-        "Reaper bridge preflight: state=%s selected=%s phase=%s bridge_status=%s heartbeat_age=%s",
+        "Reaper bridge preflight: state=%s selected=%s phase=%s bridge_status=%s heartbeat_age=%s cached=%s",
         preflight.get("setup_state"),
         preflight.get("selected_item_count"),
         preflight.get("export_phase"),
         preflight.get("status"),
         preflight.get("heartbeat_age_seconds"),
+        preflight.get("preflight_cached", False),
     )
     if preflight.get("setup_state") != "READY":
         return jsonify({
