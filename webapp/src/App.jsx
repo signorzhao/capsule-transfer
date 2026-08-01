@@ -1383,62 +1383,63 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
               setDragOverFolder(null);
             }
           }}
-          className={`group/folder w-full h-9 px-2 rounded-lg flex items-center gap-2 text-left transition-colors ${active ? 'bg-indigo-500/15 border border-indigo-500/35 text-indigo-100' : isDragOver ? 'border border-indigo-500/50 bg-indigo-500/10 text-indigo-100' : canSelect ? 'border border-transparent text-slate-400 hover:bg-slate-800/70 hover:text-slate-200' : 'border border-transparent text-slate-500'}`}
+          className={`group/folder w-full px-2 rounded-lg flex gap-2 text-left transition-colors ${isEditingFolder ? 'min-h-[70px] py-2 items-start' : 'h-9 items-center'} ${active ? 'bg-indigo-500/15 border border-indigo-500/35 text-indigo-100' : isDragOver ? 'border border-indigo-500/50 bg-indigo-500/10 text-indigo-100' : canSelect ? 'border border-transparent text-slate-400 hover:bg-slate-800/70 hover:text-slate-200' : 'border border-transparent text-slate-500'}`}
           style={{ paddingLeft: `${8 + depth * 18}px` }}
           >
-          {hasChildren ? <ChevronDown size={14} className="text-slate-500 shrink-0" /> : <span className="w-3.5 shrink-0" />}
-          <Icon size={15} className={active ? 'text-indigo-300 shrink-0' : 'text-slate-500 shrink-0'} />
+          {hasChildren ? <ChevronDown size={14} className={`text-slate-500 shrink-0 ${isEditingFolder ? 'mt-1.5' : ''}`} /> : <span className={`w-3.5 shrink-0 ${isEditingFolder ? 'mt-1.5' : ''}`} />}
+          <Icon size={15} className={`${active ? 'text-indigo-300' : 'text-slate-500'} shrink-0 ${isEditingFolder ? 'mt-1.5' : ''}`} />
           {isEditingFolder ? (
-            <input
-              autoFocus
-              value={folderEditName}
-              onClick={(event) => event.stopPropagation()}
-              onChange={(event) => setFolderEditName(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  confirmRenameFolder(folder);
-                }
-                if (event.key === 'Escape') {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  cancelRenameFolder();
-                }
-              }}
-              className="min-w-0 flex-1 rounded border border-indigo-500/60 bg-[#0f1115] px-1.5 py-0.5 text-sm text-slate-100 focus:outline-none"
-            />
+            <div className="min-w-0 flex-1">
+              <input
+                autoFocus
+                value={folderEditName}
+                onClick={(event) => event.stopPropagation()}
+                onChange={(event) => setFolderEditName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    confirmRenameFolder(folder);
+                  }
+                  if (event.key === 'Escape') {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    cancelRenameFolder();
+                  }
+                }}
+                className="w-full rounded border border-indigo-500/60 bg-[#0f1115] px-2 py-1 text-sm text-slate-100 focus:outline-none"
+              />
+              <div className="mt-1 flex items-center justify-end gap-1">
+                <span
+                  role="button"
+                  tabIndex={0}
+                  title="Save collection name"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    confirmRenameFolder(folder);
+                  }}
+                  className="rounded p-1 text-emerald-400 hover:bg-emerald-500/10"
+                >
+                  <Check size={13} />
+                </span>
+                <span
+                  role="button"
+                  tabIndex={0}
+                  title="Cancel rename"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    cancelRenameFolder();
+                  }}
+                  className="rounded p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-200"
+                >
+                  <X size={13} />
+                </span>
+              </div>
+            </div>
           ) : (
             <span className="min-w-0 flex-1 truncate text-sm" title={folder.label}>{folder.label}</span>
           )}
-          {isEditingFolder ? (
-            <span className="flex shrink-0 items-center gap-1">
-              <span
-                role="button"
-                tabIndex={0}
-                title="SaveCollectionsName"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  confirmRenameFolder(folder);
-                }}
-                className="rounded p-1 text-emerald-400 hover:bg-emerald-500/10"
-              >
-                <Check size={13} />
-              </span>
-              <span
-                role="button"
-                tabIndex={0}
-                title="Cancel rename"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  cancelRenameFolder();
-                }}
-                className="rounded p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-200"
-              >
-                <X size={13} />
-              </span>
-            </span>
-          ) : isConfirmingDelete ? (
+          {!isEditingFolder && isConfirmingDelete ? (
             <span className="flex shrink-0 items-center gap-1">
               <span
                 role="button"
@@ -1466,7 +1467,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
               </span>
             </span>
           ) : null}
-          <span className="text-[11px] text-slate-500">{folder.count}</span>
+          {!isEditingFolder && <span className="text-[11px] text-slate-500">{folder.count}</span>}
         </div>
         {hasChildren && (
           <div className="mt-1 space-y-1">
@@ -1510,7 +1511,7 @@ function LibraryView({ capsules, onSend, onDelete, onCreate, onRequestCreate, is
 
       {showCreateForm && <CreateCapsuleForm onCancel={() => setShowCreateForm(false)} onSubmit={async (data) => { const result = await onCreate(data); if (result !== false) setShowCreateForm(false); }} />}
 
-      <div className="grid min-h-0 flex-1 grid-cols-[220px_minmax(0,1fr)] gap-3">
+      <div className="grid min-h-0 flex-1 grid-cols-[260px_minmax(0,1fr)] gap-3">
           <aside className="min-h-[220px] lg:min-h-0 rounded-lg border border-[#20262a] bg-[#0b0e10] p-3 flex flex-col">
             <div className="flex items-center justify-between mb-3">
               <div>
